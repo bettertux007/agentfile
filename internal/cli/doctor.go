@@ -2,22 +2,19 @@ package cli
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/bettertux007/agentfile/internal/adapters"
 	"github.com/bettertux007/agentfile/internal/adapters/registry"
 	"github.com/bettertux007/agentfile/internal/config"
+	"github.com/bettertux007/agentfile/internal/diff"
 	"github.com/bettertux007/agentfile/internal/ir"
 	"github.com/bettertux007/agentfile/internal/runner"
 	"github.com/bettertux007/agentfile/internal/spec"
 	"github.com/bettertux007/agentfile/internal/store"
-	"github.com/bettertux007/agentfile/schemas"
 	"github.com/spf13/cobra"
 	"github.com/tailscale/hujson"
 )
@@ -36,11 +33,14 @@ type DoctorReport struct {
 
 // DoctorConfigSummary displays the resolved machine-local configuration.
 type DoctorConfigSummary struct {
-	LinkMode   string `json:"link_mode"`
-	OnConflict string `json:"on_conflict"`
-	GitExclude bool   `json:"git_exclude"`
-	LoadGlobal *bool  `json:"load_global,omitempty"`
-	ConfigPath string `json:"config_path"`
+	LinkMode        string            `json:"link_mode"`
+	OnConflict      string            `json:"on_conflict"`
+	GitExclude      bool              `json:"git_exclude"`
+	LoadGlobal      *bool             `json:"load_global,omitempty"`
+	ConfigPath      string            `json:"config_path"`
+	LocalConfigPath string            `json:"local_config_path,omitempty"`
+	UserConfigPath  string            `json:"user_config_path,omitempty"`
+	Sources         map[string]string `json:"sources,omitempty"`
 }
 
 // DoctorTargetStatus describes binary presence, SchemaContract, and isolation status for one target.
@@ -78,79 +78,25 @@ func newDoctorCmd(ec *execContext) *cobra.Command {
 		Short: "Validate Agentfile.yaml, lockfile, installed CLIs, and global config conflicts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ins, err := inspectWorkspace(ec.workDir, ec.isTTY, store.ParseOptions{AllowFileScheme: true})
+			if err != nil {
+				return err
+			}
+
 			rep := DoctorReport{
-				LockStatus: "not_checked",
+				ManifestValid:   ins.ManifestValid,
+				SchemaErrors:    append([]string(nil), ins.SchemaErrors...),
+				LockStatus:      ins.LockStatus,
+				EffectiveConfig: ins.ConfigSummary,
+				Warnings:        append([]string(nil), ins.Warnings...),
 			}
+			ps := ins.ProjectSpec
+			effCfg := ins.EffectiveCfg
 
-			// 1. Validate Agentfile.yaml against JSON Schema v1 & spec.Parse.
-			manifestPath := filepath.Join(ec.workDir, "Agentfile.yaml")
-			var ps *spec.ProjectSpec
-			rawManifest, readErr := os.ReadFile(manifestPath)
-			if readErr != nil {
-				if errors.Is(readErr, os.ErrNotExist) {
-					rep.SchemaErrors = append(rep.SchemaErrors, "Agentfile.yaml not found")
-				} else {
-					rep.SchemaErrors = append(rep.SchemaErrors, readErr.Error())
-				}
-			} else {
-				if err := schemas.ValidateAgentfileV1(rawManifest); err != nil {
-					rep.SchemaErrors = append(rep.SchemaErrors, fmt.Sprintf("JSON schema: %v", err))
-				}
-				parsed, perr := spec.ParseFile(manifestPath)
-				if perr != nil {
-					rep.SchemaErrors = append(rep.SchemaErrors, fmt.Sprintf("spec parser: %v", perr))
-				} else {
-					ps = parsed
-				}
-				if len(rep.SchemaErrors) == 0 {
-					rep.ManifestValid = true
-				}
-			}
-
-			// 2. Verify Agentfile.lock if manifest parsed.
-			if ps != nil {
-				lockPath := filepath.Join(ec.workDir, "Agentfile.lock")
-				lf, lerr := spec.LoadLock(lockPath)
-				if errors.Is(lerr, os.ErrNotExist) {
-					rep.LockStatus = "missing"
-					if hasRemoteDeps(ps, ec.workDir) {
-						rep.Warnings = append(rep.Warnings, "Agentfile.lock does not exist yet; run 'agentfile sync' to pin remote dependencies")
-					}
-				} else if lerr != nil {
-					rep.LockStatus = "invalid"
-					rep.SchemaErrors = append(rep.SchemaErrors, lerr.Error())
-				} else {
-					verr := spec.VerifyMatches(lf, ps, func(src spec.SourceSpec) (string, string, bool, error) {
-						p, err := store.ParseSource(src, ec.workDir, store.ParseOptions{AllowFileScheme: true})
-						if err != nil {
-							return "", "", false, err
-						}
-						if p.IsLocal {
-							return p.LocalPath, "", false, nil
-						}
-						return p.CanonicalURL, p.Ref, true, nil
-					})
-					if verr != nil {
-						rep.LockStatus = "out_of_sync"
-						rep.SchemaErrors = append(rep.SchemaErrors, verr.Error())
-					} else {
-						rep.LockStatus = "ok"
-					}
-				}
-			}
-
-			// 3. Resolve effective .agentfile/config.yaml.
-			effCfg, cerr := config.Resolve(ec.workDir, config.CLIOverrides{}, ec.isTTY)
-			if cerr != nil {
-				rep.SchemaErrors = append(rep.SchemaErrors, fmt.Sprintf("config: %v", cerr))
-			} else {
-				rep.EffectiveConfig = &DoctorConfigSummary{
-					LinkMode:   effCfg.LinkMode,
-					OnConflict: effCfg.OnConflict,
-					GitExclude: effCfg.GitExclude,
-					LoadGlobal: effCfg.LoadGlobal,
-					ConfigPath: effCfg.ConfigPath,
-				}
+			if ins.LockStatus == "missing" {
+				rep.Warnings = appendUniqueString(rep.Warnings, "Agentfile.lock does not exist yet; run 'agentfile sync' to pin remote dependencies")
+			} else if ins.LockStatus == "out_of_sync" && ins.LockError != nil {
+				rep.SchemaErrors = append(rep.SchemaErrors, ins.LockError.Error())
 			}
 
 			// 4. Check installed target CLIs, SchemaContract versions, and global isolation status.
@@ -174,10 +120,12 @@ func newDoctorCmd(ec *execContext) *cobra.Command {
 				contract := adp.SchemaContract()
 				lg := true
 				lgSource := config.SourceDefault
-				if ps != nil {
+				if effCfg != nil {
 					var specCfg spec.TargetConfigSpec
-					if c, ok := ps.TargetsConfig[t]; ok {
-						specCfg = c
+					if ps != nil {
+						if c, ok := ps.TargetsConfig[t]; ok {
+							specCfg = c
+						}
 					}
 					var ow string
 					var rerr error
@@ -186,11 +134,11 @@ func newDoctorCmd(ec *execContext) *cobra.Command {
 						rep.SchemaErrors = append(rep.SchemaErrors, rerr.Error())
 					}
 					if ow != "" {
-						rep.Warnings = append(rep.Warnings, ow)
+						rep.Warnings = appendUniqueString(rep.Warnings, ow)
 					}
-					if specCfg.LoadGlobal != nil && !*specCfg.LoadGlobal {
-						rep.Warnings = append(rep.Warnings,
-							fmt.Sprintf("RUNTIME_ONLY_ISOLATION: target %s sets load_global=false; bare '%s' invocations still read user globals unless launched via 'agentfile run %s'", t, adp.BinaryName(), t))
+					if !lg && ps != nil {
+						rep.Warnings = appendUniqueString(rep.Warnings,
+							fmt.Sprintf("RUNTIME_ONLY_ISOLATION: target %s resolves load_global=false (%s); bare '%s' invocations still read user globals unless launched via 'agentfile run %s'", t, lgSource, adp.BinaryName(), t))
 					}
 				}
 
@@ -270,10 +218,10 @@ func newDoctorCmd(ec *execContext) *cobra.Command {
 			}
 
 			for i, w := range rep.Warnings {
-				rep.Warnings[i] = RedactSecrets(w)
+				rep.Warnings[i] = diff.RedactSecrets(w)
 			}
 			for i, e := range rep.SchemaErrors {
-				rep.SchemaErrors[i] = RedactSecrets(e)
+				rep.SchemaErrors[i] = diff.RedactSecrets(e)
 			}
 
 			if jsonOutput {
@@ -295,29 +243,6 @@ func newDoctorCmd(ec *execContext) *cobra.Command {
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Emit doctor report as JSON")
 	return cmd
-}
-
-func hasRemoteDeps(ps *spec.ProjectSpec, root string) bool {
-	check := func(s spec.SourceSpec) bool {
-		p, err := store.ParseSource(s, root, store.ParseOptions{AllowFileScheme: true})
-		return err == nil && !p.IsLocal
-	}
-	for _, sk := range ps.Skills {
-		if check(sk.Source) {
-			return true
-		}
-	}
-	for _, ag := range ps.Agents {
-		if check(ag.Source) {
-			return true
-		}
-	}
-	for _, rl := range ps.Rules {
-		if check(rl.Source) {
-			return true
-		}
-	}
-	return false
 }
 
 func checkGlobalMCPFile(full, jsonKey string, ps *spec.ProjectSpec) ([]GlobalConflictEntry, []string) {
@@ -354,23 +279,6 @@ func checkGlobalMCPFile(full, jsonKey string, ps *spec.ProjectSpec) ([]GlobalCon
 		}
 	}
 	return conflicts, warnings
-}
-
-// RedactSecrets masks credential-like tokens inside diagnostic text.
-func RedactSecrets(s string) string {
-	lower := strings.ToLower(s)
-	for _, kw := range []string{"bearer ", "token=", "secret=", "password=", "api_key="} {
-		if idx := strings.Index(lower, kw); idx >= 0 {
-			prefix := s[:idx+len(kw)]
-			rest := s[idx+len(kw):]
-			end := strings.IndexAny(rest, " \t\n\"'")
-			if end < 0 {
-				return prefix + "[REDACTED]"
-			}
-			return prefix + "[REDACTED]" + rest[end:]
-		}
-	}
-	return s
 }
 
 func printDoctorHuman(w interface{ Write([]byte) (int, error) }, rep *DoctorReport) {

@@ -95,6 +95,8 @@ func newRootCmd(ec *execContext) *cobra.Command {
 	cmd.AddCommand(
 		newInitCmd(ec),
 		newSyncCmd(ec),
+		newStatusCmd(ec),
+		newDiffCmd(ec),
 		newCleanCmd(ec),
 		newDoctorCmd(ec),
 		newRunCmd(ec),

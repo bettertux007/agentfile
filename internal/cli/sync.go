@@ -14,12 +14,19 @@ import (
 	"github.com/bettertux007/agentfile/internal/adapters"
 	"github.com/bettertux007/agentfile/internal/adapters/registry"
 	"github.com/bettertux007/agentfile/internal/config"
+	"github.com/bettertux007/agentfile/internal/diff"
 	"github.com/bettertux007/agentfile/internal/engine"
 	"github.com/bettertux007/agentfile/internal/ir"
 	"github.com/bettertux007/agentfile/internal/spec"
 	"github.com/bettertux007/agentfile/internal/store"
 	"github.com/spf13/cobra"
 )
+
+type syncResult struct {
+	Summary  engine.PlanSummary
+	Deltas   []store.LockDelta
+	NextLock *spec.Lockfile
+}
 
 type syncOptions struct {
 	Targets            []string
@@ -67,13 +74,37 @@ func newSyncCmd(ec *execContext) *cobra.Command {
 }
 
 func executeSync(ctx context.Context, ec *execContext, opts syncOptions) (*engine.PlanSummary, error) {
-	manifestPath := filepath.Join(ec.workDir, "Agentfile.yaml")
-	ps, err := spec.ParseFile(manifestPath)
+	res, err := executeSyncWithSpec(ctx, ec, opts, nil, store.ResolveOptions{
+		UpdateTarget: opts.Update,
+		ParseOpts: store.ParseOptions{
+			AllowExternalLocal: opts.AllowExternalLocal,
+			AllowFileScheme:    os.Getenv("AGENTFILE_ALLOW_FILE_GIT") == "1",
+		},
+	})
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, spec.NewPolicyError("Agentfile.yaml not found in %s (run 'agentfile init' first)", ec.workDir)
-		}
 		return nil, err
+	}
+	return &res.Summary, nil
+}
+
+func executeSyncWithSpec(
+	ctx context.Context,
+	ec *execContext,
+	opts syncOptions,
+	overrideSpec *spec.ProjectSpec,
+	resolveOpts store.ResolveOptions,
+) (*syncResult, error) {
+	ps := overrideSpec
+	if ps == nil {
+		manifestPath := filepath.Join(ec.workDir, "Agentfile.yaml")
+		var err error
+		ps, err = spec.ParseFile(manifestPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, spec.NewPolicyError("Agentfile.yaml not found in %s (run 'agentfile init' first)", ec.workDir)
+			}
+			return nil, err
+		}
 	}
 
 	if opts.Force {
@@ -121,14 +152,21 @@ func executeSync(ctx context.Context, ec *execContext, opts syncOptions) (*engin
 	if err != nil {
 		return nil, err
 	}
-	parseOpts := store.ParseOptions{
-		AllowExternalLocal: opts.AllowExternalLocal,
-		AllowFileScheme:    os.Getenv("AGENTFILE_ALLOW_FILE_GIT") == "1",
+	if resolveOpts.UpdateTarget == "" && opts.Update != "" {
+		resolveOpts.UpdateTarget = opts.Update
 	}
-	resolvedDeps, nextLock, err := st.ResolveAll(ctx, ec.workDir, ps, lf, opts.Update, parseOpts)
+	if opts.AllowExternalLocal {
+		resolveOpts.ParseOpts.AllowExternalLocal = true
+	}
+	if os.Getenv("AGENTFILE_ALLOW_FILE_GIT") == "1" {
+		resolveOpts.ParseOpts.AllowFileScheme = true
+	}
+	res, err := st.ResolveWithOptions(ctx, ec.workDir, ps, lf, resolveOpts)
 	if err != nil {
 		return nil, err
 	}
+	resolvedDeps := res.Assets
+	nextLock := res.NextLock
 
 	if opts.CheckOnly {
 		if (lf == nil && len(nextLock.Dependencies) > 0) || (lf != nil && !locksEqual(lf, nextLock)) {
@@ -185,24 +223,37 @@ func executeSync(ctx context.Context, ec *execContext, opts syncOptions) (*engin
 		return nil, err
 	}
 
+	for _, w := range effCfg.Warnings {
+		plan.Summary.Warnings = appendUniqueString(plan.Summary.Warnings, w)
+	}
+
 	// Surface RUNTIME_ONLY_ISOLATION notice on normal sync/dry-run (suppressed during `agentfile run` QuietStdout).
-	if !opts.QuietStdout {
-		for _, t := range activeTargets {
-			if cfg, ok := ps.TargetsConfig[t]; ok && cfg.LoadGlobal != nil && !*cfg.LoadGlobal {
-				plan.Summary.Warnings = append(plan.Summary.Warnings,
-					fmt.Sprintf("RUNTIME_ONLY_ISOLATION: target %s sets load_global=false; use 'agentfile run %s' to enforce runtime isolation (bare '%s' still reads user globals)", t, t, t))
+	for _, t := range activeTargets {
+		lg, lgSource, ow, rerr := config.ResolveTargetLoadGlobal(ps.TargetsConfig[t], effCfg, false, false, false)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if !opts.QuietStdout {
+			if ow != "" {
+				plan.Summary.Warnings = appendUniqueString(plan.Summary.Warnings, ow)
+			}
+			if !lg {
+				adp, _ := registry.Lookup(reg, t)
+				binName := t
+				if adp != nil {
+					binName = adp.BinaryName()
+				}
+				plan.Summary.Warnings = appendUniqueString(plan.Summary.Warnings,
+					fmt.Sprintf("RUNTIME_ONLY_ISOLATION: target %s resolves load_global=false (%s); use 'agentfile run %s' to enforce runtime isolation (bare '%s' still reads user globals)", t, lgSource, t, binName))
 			}
 		}
 	}
 
 	if opts.CheckOnly {
-		_, jErr := os.Stat(engine.JournalPath(ec.workDir))
-		_, sErr := os.Stat(engine.StatePath(ec.workDir))
-		prevState, _ := engine.LoadState(ec.workDir)
-		if len(plan.Actions) > 0 || len(plan.PruneOps) > 0 || jErr == nil || os.IsNotExist(sErr) || !engine.StatesEqual(prevState, plan.NextState) {
-			return nil, spec.NewPolicyError("workspace is out of sync with Agentfile.yaml (run 'agentfile sync')")
+		if drifted, reason := engine.CheckWorkspaceDrift(ec.workDir, plan); drifted {
+			return nil, spec.NewPolicyError("workspace is out of sync with Agentfile.yaml: %s (run 'agentfile sync')", reason)
 		}
-		return &plan.Summary, nil
+		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
 	}
 
 	if opts.DryRun {
@@ -211,7 +262,7 @@ func executeSync(ctx context.Context, ec *execContext, opts syncOptions) (*engin
 				return nil, err
 			}
 		}
-		return &plan.Summary, nil
+		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
 	}
 
 	if err := engine.Commit(plan); err != nil {
@@ -226,15 +277,15 @@ func executeSync(ctx context.Context, ec *execContext, opts syncOptions) (*engin
 
 	if opts.QuietStdout {
 		for _, warn := range plan.Summary.Warnings {
-			fmt.Fprintf(ec.errOut, "warning: %s\n", RedactSecrets(warn))
+			fmt.Fprintf(ec.errOut, "warning: %s\n", diff.RedactSecrets(warn))
 		}
-		return &plan.Summary, nil
+		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
 	}
 
 	if err := printSummary(ec.out, &plan.Summary, false, opts.JSONOutput); err != nil {
 		return nil, err
 	}
-	return &plan.Summary, nil
+	return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
 }
 
 func locksEqual(a, b *spec.Lockfile) bool {
@@ -323,7 +374,7 @@ func printSummary(w io.Writer, s *engine.PlanSummary, dryRun bool, asJSON bool) 
 		}
 	}
 	for _, warn := range s.Warnings {
-		fmt.Fprintf(w, "warning: %s\n", RedactSecrets(warn))
+		fmt.Fprintf(w, "warning: %s\n", diff.RedactSecrets(warn))
 	}
 	return nil
 }

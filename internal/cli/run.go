@@ -8,11 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/bettertux007/agentfile/internal/adapters"
 	"github.com/bettertux007/agentfile/internal/adapters/registry"
 	"github.com/bettertux007/agentfile/internal/config"
+	"github.com/bettertux007/agentfile/internal/diff"
 	"github.com/bettertux007/agentfile/internal/engine"
 	"github.com/bettertux007/agentfile/internal/ir"
 	"github.com/bettertux007/agentfile/internal/runner"
@@ -100,7 +102,12 @@ func newRunCmd(ec *execContext) *cobra.Command {
 				return err
 			}
 			if overrideWarn != "" {
-				fmt.Fprintf(ec.errOut, "warning: %s\n", overrideWarn)
+				fmt.Fprintf(ec.errOut, "warning: %s\n", diff.RedactSecrets(overrideWarn))
+			}
+			if syncMode != "auto" {
+				for _, w := range effCfg.Warnings {
+					fmt.Fprintf(ec.errOut, "warning: %s\n", diff.RedactSecrets(w))
+				}
 			}
 
 			if os.Getenv("AGENTFILE_ACTIVE") == "1" {
@@ -155,12 +162,12 @@ func newRunCmd(ec *execContext) *cobra.Command {
 			for _, d := range plan.Diagnostics {
 				switch d.Level {
 				case adapters.DiagError:
-					return spec.NewPolicyError("[%s] %s", d.Target, d.Message)
+					return spec.NewPolicyError("[%s] %s", d.Target, diff.RedactSecrets(d.Message))
 				case adapters.DiagWarning:
-					fmt.Fprintf(ec.errOut, "warning: [%s] %s\n", d.Target, RedactSecrets(d.Message))
+					fmt.Fprintf(ec.errOut, "warning: [%s] %s\n", d.Target, diff.RedactSecrets(d.Message))
 				case adapters.DiagInfo:
 					if ec.verbose {
-						fmt.Fprintf(ec.errOut, "info: [%s] %s\n", d.Target, RedactSecrets(d.Message))
+						fmt.Fprintf(ec.errOut, "info: [%s] %s\n", d.Target, diff.RedactSecrets(d.Message))
 					}
 				}
 			}
@@ -181,7 +188,7 @@ func newRunCmd(ec *execContext) *cobra.Command {
 					"AGENTFILE_ISOLATION_MODE": string(plan.Mode),
 				}
 				for k, v := range plan.EnvOverrides {
-					envAdded[k] = v
+					envAdded[k] = redactEnvValue(k, v)
 				}
 				rep := RunDryRunReport{
 					Target:           target,
@@ -228,4 +235,18 @@ func newRunCmd(ec *execContext) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print resolved command and isolation state without launching")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Emit --dry-run report as JSON")
 	return cmd
+}
+
+func redactEnvValue(k, v string) string {
+	if v == "" {
+		return ""
+	}
+	kv := k + "=" + strconv.Quote(v)
+	redKV := diff.RedactSecrets(kv)
+	if rest, ok := strings.CutPrefix(redKV, k+"="); ok {
+		if unq, err := strconv.Unquote(rest); err == nil {
+			return unq
+		}
+	}
+	return diff.RedactSecrets(v)
 }
