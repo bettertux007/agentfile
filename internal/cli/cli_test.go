@@ -1466,3 +1466,509 @@ targets_config:
 		t.Fatalf("expected redacted placeholders/headers in warnings:\n%s", joined)
 	}
 }
+
+func TestAddRemoveUpgradeEndToEnd(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_ALLOW_FILE_GIT", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	// Set up bare Git repository with pinned tag v1.0.0 and floating main branch.
+	tmp := t.TempDir()
+	workRepo := filepath.Join(tmp, "work")
+	bareRepo := filepath.Join(tmp, "remote.git")
+	_ = os.MkdirAll(filepath.Join(workRepo, "skills", "k8s"), 0o755)
+	_ = os.WriteFile(filepath.Join(workRepo, "skills", "k8s", "SKILL.md"), []byte("# K8s v1\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(workRepo, "skills", "ops"), 0o755)
+	_ = os.WriteFile(filepath.Join(workRepo, "skills", "ops", "SKILL.md"), []byte("# Ops v1\n"), 0o644)
+
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	runGit(workRepo, "init", "-b", "main")
+	runGit(workRepo, "add", ".")
+	runGit(workRepo, "commit", "-m", "v1")
+	v1SHA := runGit(workRepo, "rev-parse", "HEAD")
+	runGit(workRepo, "tag", "-a", "v1.0.0", "-m", "v1.0.0")
+	runGit(tmp, "clone", "--bare", workRepo, bareRepo)
+
+	repoURL := "file://" + filepath.ToSlash(bareRepo)
+
+	proj := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(proj, "skills", "local-skill"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "skills", "local-skill", "SKILL.md"), []byte("# Local Skill\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(proj, "agents"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "agents", "reviewer.md"), []byte("# Reviewer\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(proj, "docs"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "docs", "RULES.md"), []byte("Keep code clean.\n"), 0o644)
+
+	// Fail closed when Agentfile.yaml is missing.
+	var out, errOut bytes.Buffer
+	if code := ExecuteWithIO([]string{"add", "skill", "s", "./skills/local-skill"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 when Agentfile.yaml missing on add, got %d", code)
+	}
+	if code := ExecuteWithIO([]string{"remove", "skill", "s"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 when Agentfile.yaml missing on remove, got %d", code)
+	}
+
+	// Hand-commented Agentfile.yaml.
+	initialYAML := `# Top manifest comment
+version: 1
+targets:
+  - claude # keep target comment
+  - cursor
+# Skills block comment
+skills:
+  - name: k8s # pinned skill
+    source: "` + repoURL + `#v1.0.0//skills/k8s"
+`
+	manifestPath := filepath.Join(proj, "Agentfile.yaml")
+	if err := os.WriteFile(manifestPath, []byte(initialYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Initial sync locks skill:k8s.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("initial sync failed (%d): %s", code, errOut.String())
+	}
+
+	// 1. add skill (floating branch), add agent, add rule preserving comments & formatting.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "ops", repoURL + "#main//skills/ops"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("add skill ops failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "agent", "reviewer", "./agents/reviewer.md", "--description", "Code reviewer", "--model", "sonnet"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("add agent failed (%d): %s", code, errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "rule", "style", "./docs/RULES.md", "--description", "Style", "--globs", "**/*.go", "--always-apply"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("add rule failed (%d): %s", code, errOut.String())
+	}
+
+	// 2. add mcp: transport inference + colon splitting + --env-ref + --header-env.
+	// Conflicting or missing transport args -> exit 2.
+	badMCPCalls := [][]string{
+		{"add", "mcp", "bad1"},
+		{"add", "mcp", "bad2", "--url", "https://api.example.com/mcp", "--", "npx", "mcp"},
+		{"add", "mcp", "bad3", "--env", "KEY="},
+		{"add", "mcp", "bad4", "--url", "https://api.example.com/mcp", "--header", "Authorization:"},
+		{"add", "mcp", "bad5", "--env", "TOKEN=ghp_1234567890abcdef", "--", "npx", "mcp"},
+		{"add", "mcp", "bad6", "--url", "https://api.example.com/mcp", "--header", "Authorization: Bearer rawtok"},
+		{"add", "mcp", "bad7", "--url", "https://u:pass@host/mcp"},
+	}
+	for _, args := range badMCPCalls {
+		out.Reset()
+		errOut.Reset()
+		if code := ExecuteWithIO(args, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+			t.Fatalf("expected exit 2 for %v, got %d (err=%s)", args, code, errOut.String())
+		}
+	}
+
+	// Valid http MCP with inferred transport, --header colon splitting, --header-env Authorization & custom header.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{
+		"add", "mcp", "github",
+		"--url", "https://api.githubcopilot.com/mcp/",
+		"--header", "X-Custom: a:b",
+		"--header-env", "GITHUB_PAT:Authorization",
+		"--header-env", "API_KEY:X-API-Key",
+	}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("add mcp github failed (%d): %s", code, errOut.String())
+	}
+
+	// Valid stdio MCP with inferred transport and --env-ref.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{
+		"add", "mcp", "fs",
+		"--env", "LOG_LEVEL=info",
+		"--env-ref", "FOO",
+		"--", "npx", "-y", "@mcp/fs",
+	}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("add mcp fs failed (%d): %s", code, errOut.String())
+	}
+
+	// Verify comments preserved and MCP entries lowered/written correctly.
+	manifestAfterAdd, _ := os.ReadFile(manifestPath)
+	mStr := string(manifestAfterAdd)
+	for _, want := range []string{
+		"# Top manifest comment",
+		"- claude # keep target comment",
+		"# Skills block comment",
+		"- name: k8s # pinned skill",
+		"transport: http",
+		"X-Custom: a:b",
+		"Authorization: Bearer ${GITHUB_PAT}",
+		"X-API-Key: ${API_KEY}",
+		"transport: stdio",
+		"FOO: ${FOO}",
+		"LOG_LEVEL: info",
+	} {
+		if !strings.Contains(mStr, want) {
+			t.Fatalf("expected %q in Agentfile.yaml:\n%s", want, mStr)
+		}
+	}
+
+	// Duplicate add without --replace fails exit 2; with --replace updates in place.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "ops", "./skills/local-skill"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 on duplicate add without --replace, got %d", code)
+	}
+	// Replace local skill -> add local-skill with --no-sync, then replace it and sync.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "local-skill", "./skills/local-skill", "--no-sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("add skill --no-sync failed (%d): %s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "skills", "local-skill")); !os.IsNotExist(err) {
+		t.Fatalf("add --no-sync must not materialize workspace files")
+	}
+	// External local path fails without --allow-external-local and succeeds with it (--no-sync).
+	extSkill := filepath.Join(t.TempDir(), "ext-skill")
+	_ = os.MkdirAll(extSkill, 0o755)
+	_ = os.WriteFile(filepath.Join(extSkill, "SKILL.md"), []byte("# Ext\n"), 0o644)
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "local-skill", extSkill, "--replace", "--no-sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 for external local path without --allow-external-local, got %d", code)
+	}
+	// Replace local-skill back to ./skills/local-skill with sync.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "local-skill", "./skills/local-skill", "--replace"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("add skill --replace failed (%d): %s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "skills", "local-skill", "SKILL.md")); err != nil {
+		t.Fatalf("expected replaced skill materialized: %v", err)
+	}
+	// Remove local-skill so remaining assertions stay clean.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"remove", "skill", "local-skill"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("remove local-skill failed (%d): %s", code, errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "mcp", "fs", "--replace", "--env-ref", "BAR", "--", "node", "server.js"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("add mcp --replace failed (%d): %s", code, errOut.String())
+	}
+	manifestReplaced, _ := os.ReadFile(manifestPath)
+	if !strings.Contains(string(manifestReplaced), "command: node") || !strings.Contains(string(manifestReplaced), "BAR: ${BAR}") {
+		t.Fatalf("expected replaced mcp fs:\n%s", manifestReplaced)
+	}
+
+	// 3. Pre-write safety: unreachable Git ref leaves Agentfile.yaml and Agentfile.lock untouched.
+	beforeFailManifest, _ := os.ReadFile(manifestPath)
+	beforeFailLock, _ := os.ReadFile(filepath.Join(proj, "Agentfile.lock"))
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "broken", repoURL + "#nonexistent-ref//skills/k8s"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 && code != 1 {
+		t.Fatalf("expected non-zero exit on unreachable ref, got %d", code)
+	}
+	afterFailManifest, _ := os.ReadFile(manifestPath)
+	afterFailLock, _ := os.ReadFile(filepath.Join(proj, "Agentfile.lock"))
+	if string(beforeFailManifest) != string(afterFailManifest) || string(beforeFailLock) != string(afterFailLock) {
+		t.Fatalf("failed add mutated Agentfile.yaml or Agentfile.lock on disk")
+	}
+
+	// 4. Push new commit to main in bareRepo and test `upgrade` + `sync --update`.
+	_ = os.WriteFile(filepath.Join(workRepo, "skills", "ops", "SKILL.md"), []byte("# Ops v2\n"), 0o644)
+	runGit(workRepo, "add", ".")
+	runGit(workRepo, "commit", "-m", "v2")
+	v2SHA := runGit(workRepo, "rev-parse", "HEAD")
+	runGit(workRepo, "push", bareRepo, "main")
+
+	// upgrade --dry-run --json reports pinned k8s unchanged and ops updated without modifying lockfile.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"upgrade", "--dry-run", "--json"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("upgrade --dry-run --json failed (%d): %s", code, errOut.String())
+	}
+	var upDry UpgradeReport
+	if err := json.Unmarshal(out.Bytes(), &upDry); err != nil {
+		t.Fatalf("invalid UpgradeReport JSON: %v\n%s", err, out.String())
+	}
+	if len(upDry.Deltas) != 2 {
+		t.Fatalf("expected 2 deltas, got %+v", upDry.Deltas)
+	}
+	lockDuringDry, _ := os.ReadFile(filepath.Join(proj, "Agentfile.lock"))
+	if !strings.Contains(string(lockDuringDry), v1SHA) || strings.Contains(string(lockDuringDry), v2SHA) {
+		t.Fatalf("upgrade --dry-run must not mutate Agentfile.lock")
+	}
+
+	// Human upgrade on all dependencies prints pinned vs updated LockDelta lines.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"upgrade"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("upgrade failed (%d): %s", code, errOut.String())
+	}
+	upOut := out.String()
+	if !strings.Contains(upOut, "unchanged (pinned to v1.0.0)") || !strings.Contains(upOut, v1SHA+".."+v2SHA) {
+		t.Fatalf("expected pinned and SHA delta lines in upgrade output:\n%s", upOut)
+	}
+
+	// Push v3 and test `upgrade skill ops` (2-arg form) and `sync --update=skill:ops --json`.
+	_ = os.WriteFile(filepath.Join(workRepo, "skills", "ops", "SKILL.md"), []byte("# Ops v3\n"), 0o644)
+	runGit(workRepo, "add", ".")
+	runGit(workRepo, "commit", "-m", "v3")
+	v3SHA := runGit(workRepo, "rev-parse", "HEAD")
+	runGit(workRepo, "push", bareRepo, "main")
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"upgrade", "skill", "ops"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("upgrade skill ops failed (%d): %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), v2SHA+".."+v3SHA) {
+		t.Fatalf("expected %s..%s in two-arg upgrade output:\n%s", v2SHA, v3SHA, out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"upgrade", "skill:ops"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("upgrade skill:ops failed (%d): %s", code, errOut.String())
+	}
+
+	// Push v4 and test `sync --update=skill:ops` human and JSON deltas.
+	_ = os.WriteFile(filepath.Join(workRepo, "skills", "ops", "SKILL.md"), []byte("# Ops v4\n"), 0o644)
+	runGit(workRepo, "add", ".")
+	runGit(workRepo, "commit", "-m", "v4")
+	v4SHA := runGit(workRepo, "rev-parse", "HEAD")
+	runGit(workRepo, "push", bareRepo, "main")
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"sync", "--update=skill:ops", "--dry-run", "--json"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("sync --update --dry-run --json failed (%d): %s", code, errOut.String())
+	}
+	var syncDryJSON map[string]any
+	if err := json.Unmarshal(out.Bytes(), &syncDryJSON); err != nil {
+		t.Fatalf("invalid sync --update JSON: %v\n%s", err, out.String())
+	}
+	if _, ok := syncDryJSON["deltas"]; !ok {
+		t.Fatalf("expected deltas field in sync --update --json: %+v", syncDryJSON)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"sync", "--update=skill:ops"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("sync --update failed (%d): %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), v3SHA+".."+v4SHA) {
+		t.Fatalf("expected LockDelta line in sync --update human output:\n%s", out.String())
+	}
+
+	// Invalid upgrade invocations exit 2.
+	for _, badUp := range [][]string{
+		{"upgrade", "a", "b", "c"},
+		{"upgrade", "badformat"},
+		{"upgrade", "skill:nonexistent"},
+		{"upgrade", "mcp:github"},
+	} {
+		out.Reset()
+		errOut.Reset()
+		if code := ExecuteWithIO(badUp, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+			t.Fatalf("expected exit 2 for %v, got %d", badUp, code)
+		}
+	}
+
+	// 5. remove --no-sync updates only Agentfile.yaml (lockfile & workspace untouched).
+	lockBeforeNoSync, _ := os.ReadFile(filepath.Join(proj, "Agentfile.lock"))
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"remove", "agent", "reviewer", "--no-sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("remove --no-sync failed (%d): %s", code, errOut.String())
+	}
+	lockAfterNoSync, _ := os.ReadFile(filepath.Join(proj, "Agentfile.lock"))
+	if string(lockBeforeNoSync) != string(lockAfterNoSync) {
+		t.Fatalf("remove --no-sync must not modify Agentfile.lock")
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "agents", "reviewer.md")); err != nil {
+		t.Fatalf("remove --no-sync must leave workspace artifact untouched until sync: %v", err)
+	}
+
+	// remove with sync prunes workspace + removes key from Agentfile.lock so next sync exits 0.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"remove", "skill", "k8s"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("remove skill k8s failed (%d): %s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "skills", "k8s")); !os.IsNotExist(err) {
+		t.Fatalf("expected .claude/skills/k8s pruned after remove")
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "agents", "reviewer.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected previously removed agent pruned after sync")
+	}
+	lockAfterRemove, _ := os.ReadFile(filepath.Join(proj, "Agentfile.lock"))
+	if strings.Contains(string(lockAfterRemove), "skill:k8s") {
+		t.Fatalf("expected skill:k8s removed from Agentfile.lock:\n%s", lockAfterRemove)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("subsequent sync after remove failed (%d): %s", code, errOut.String())
+	}
+
+	// Remove last remote dependency skill:ops -> Agentfile.lock reconciled to empty and status --check exits 0.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"remove", "skill", "ops"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("remove last remote skill ops failed (%d): %s", code, errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"status", "--check"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("status --check after removing all remote deps failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	// upgrade with 0 remote deps reports cleanly.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"upgrade"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("upgrade on local-only repo failed (%d): %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "No remote dependencies to upgrade.") {
+		t.Fatalf("expected 'No remote dependencies to upgrade.', got:\n%s", out.String())
+	}
+
+	// remove missing entry exits 2.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"remove", "skill", "does-not-exist"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 removing missing entry, got %d", code)
+	}
+}
+
+func TestAddRemoveDriftAndRollbackSafety(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_ALLOW_FILE_GIT", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	tmp := t.TempDir()
+	workRepo := filepath.Join(tmp, "work")
+	bareRepo := filepath.Join(tmp, "remote.git")
+	_ = os.MkdirAll(filepath.Join(workRepo, "skills", "locked"), 0o755)
+	_ = os.WriteFile(filepath.Join(workRepo, "skills", "locked", "SKILL.md"), []byte("# Locked\n"), 0o644)
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, b)
+		}
+	}
+	runGit(workRepo, "init", "-b", "main")
+	runGit(workRepo, "add", ".")
+	runGit(workRepo, "commit", "-m", "v1")
+	runGit(workRepo, "tag", "-a", "v1.0.0", "-m", "v1")
+	runGit(tmp, "clone", "--bare", workRepo, bareRepo)
+	repoURL := "file://" + filepath.ToSlash(bareRepo)
+
+	proj := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(proj, "skills", "local"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "skills", "local", "SKILL.md"), []byte("# Local\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(proj, "skills", "extra"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "skills", "extra", "SKILL.md"), []byte("# Extra\n"), 0o644)
+
+	manifest := "version: 1\ntargets: [claude]\nskills:\n  - name: locked\n    source: \"" + repoURL + "#v1.0.0//skills/locked\"\n  - name: local\n    source: ./skills/local\n"
+	manifestPath := filepath.Join(proj, "Agentfile.yaml")
+	_ = os.WriteFile(manifestPath, []byte(manifest), 0o644)
+
+	var out, errOut bytes.Buffer
+	if code := ExecuteWithIO([]string{"sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("sync failed (%d): %s", code, errOut.String())
+	}
+
+	// 1. Failing BuildPlan (conflict on disk with on_conflict=fail) leaves Agentfile.yaml and Agentfile.lock untouched.
+	origYAML, _ := os.ReadFile(manifestPath)
+	origLock, _ := os.ReadFile(filepath.Join(proj, "Agentfile.lock"))
+	conflictDir := filepath.Join(proj, ".claude", "skills", "extra")
+	_ = os.MkdirAll(conflictDir, 0o755)
+	_ = os.WriteFile(filepath.Join(conflictDir, "UNMANAGED.md"), []byte("user"), 0o644)
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "extra", "./skills/extra", "--on-conflict=fail"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 on BuildPlan conflict failure, got %d", code)
+	}
+	afterConflictYAML, _ := os.ReadFile(manifestPath)
+	afterConflictLock, _ := os.ReadFile(filepath.Join(proj, "Agentfile.lock"))
+	if string(afterConflictYAML) != string(origYAML) || string(afterConflictLock) != string(origLock) {
+		t.Fatalf("expected Agentfile.yaml and Agentfile.lock untouched on BuildPlan failure")
+	}
+	_ = os.RemoveAll(conflictDir)
+
+	// 2. Mid-commit failure rolls back Agentfile.yaml + Agentfile.lock + workspace atomically.
+	if os.Geteuid() != 0 {
+		skillsDir := filepath.Join(proj, ".claude", "skills")
+		if err := os.Chmod(skillsDir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(skillsDir, 0o755) })
+
+		out.Reset()
+		errOut.Reset()
+		if code := ExecuteWithIO([]string{"add", "skill", "extra", "./skills/extra"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code == 0 {
+			t.Fatalf("expected commit failure when .claude/skills is read-only")
+		}
+		if err := os.Chmod(skillsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		afterRollbackYAML, _ := os.ReadFile(manifestPath)
+		afterRollbackLock, _ := os.ReadFile(filepath.Join(proj, "Agentfile.lock"))
+		if string(afterRollbackYAML) != string(origYAML) || string(afterRollbackLock) != string(origLock) {
+			t.Fatalf("expected Agentfile.yaml and Agentfile.lock rolled back on commit failure")
+		}
+	}
+
+	// 3. Unrelated locked dependency drift in Agentfile.yaml causes add and remove to fail exit 2 without mutating disk.
+	driftedManifest := strings.ReplaceAll(manifest, "#v1.0.0//", "#v2.0.0//")
+	_ = os.WriteFile(manifestPath, []byte(driftedManifest), 0o644)
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "extra", "./skills/extra"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 on add when unrelated locked dep drifted, got %d (%s)", code, errOut.String())
+	}
+	afterDriftAdd, _ := os.ReadFile(manifestPath)
+	if string(afterDriftAdd) != driftedManifest {
+		t.Fatalf("expected Agentfile.yaml untouched when add failed due to unrelated lock drift")
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"remove", "skill", "local"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 on remove when unrelated locked dep drifted, got %d (%s)", code, errOut.String())
+	}
+	afterDriftRemove, _ := os.ReadFile(manifestPath)
+	if string(afterDriftRemove) != driftedManifest {
+		t.Fatalf("expected Agentfile.yaml untouched when remove failed due to unrelated lock drift")
+	}
+}

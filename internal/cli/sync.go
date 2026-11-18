@@ -20,6 +20,7 @@ import (
 	"github.com/bettertux007/agentfile/internal/spec"
 	"github.com/bettertux007/agentfile/internal/store"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 type syncResult struct {
@@ -42,6 +43,7 @@ type syncOptions struct {
 	JSONOutput         bool
 	QuietStdout        bool
 	CheckOnly          bool
+	ManifestBytes      []byte
 }
 
 func newSyncCmd(ec *execContext) *cobra.Command {
@@ -258,25 +260,40 @@ func executeSyncWithSpec(
 		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
 	}
 
+	showDeltas := resolveOpts.UpdateTarget != "" || opts.Update != ""
+
 	if opts.DryRun {
 		if !opts.QuietStdout {
-			if err := printSummary(ec.out, &plan.Summary, true, opts.JSONOutput); err != nil {
+			if err := printSummaryWithDeltas(ec.out, &plan.Summary, res.Deltas, true, showDeltas, opts.JSONOutput); err != nil {
 				return nil, err
 			}
 		}
 		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
 	}
 
+	if len(opts.ManifestBytes) > 0 {
+		plan.SidecarWrites = append(plan.SidecarWrites, engine.SidecarWrite{
+			RelPath: "Agentfile.yaml",
+			Content: opts.ManifestBytes,
+			Mode:    0o644,
+		})
+	}
+	if (len(nextLock.Dependencies) > 0 && lf == nil) || (lf != nil && !locksEqual(lf, nextLock)) {
+		lockBytes, err := marshalLockBytes(nextLock)
+		if err != nil {
+			return nil, err
+		}
+		plan.SidecarWrites = append(plan.SidecarWrites, engine.SidecarWrite{
+			RelPath: "Agentfile.lock",
+			Content: lockBytes,
+			Mode:    0o644,
+		})
+	}
+
 	if err := engine.Commit(plan); err != nil {
 		return nil, err
 	}
 	redactPlanSummary(&plan.Summary)
-
-	if (len(nextLock.Dependencies) > 0 && lf == nil) || (lf != nil && !locksEqual(lf, nextLock)) {
-		if err := spec.SaveLock(lockPath, nextLock); err != nil {
-			return nil, err
-		}
-	}
 
 	if opts.QuietStdout {
 		for _, warn := range plan.Summary.Warnings {
@@ -285,7 +302,7 @@ func executeSyncWithSpec(
 		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
 	}
 
-	if err := printSummary(ec.out, &plan.Summary, false, opts.JSONOutput); err != nil {
+	if err := printSummaryWithDeltas(ec.out, &plan.Summary, res.Deltas, false, showDeltas, opts.JSONOutput); err != nil {
 		return nil, err
 	}
 	return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
@@ -361,11 +378,39 @@ func (p *ttyPrompter) AskConflict(relPath, reason string) (engine.ConflictChoice
 	}
 }
 
+func marshalLockBytes(lf *spec.Lockfile) ([]byte, error) {
+	if lf == nil {
+		return nil, fmt.Errorf("nil lockfile")
+	}
+	out := *lf
+	out.Version = 1
+	if out.Dependencies == nil {
+		out.Dependencies = map[string]spec.LockEntry{}
+	}
+	return yaml.Marshal(&out)
+}
+
 func printSummary(w io.Writer, s *engine.PlanSummary, dryRun bool, asJSON bool) error {
+	return printSummaryWithDeltas(w, s, nil, dryRun, false, asJSON)
+}
+
+func printSummaryWithDeltas(w io.Writer, s *engine.PlanSummary, deltas []store.LockDelta, dryRun bool, showDeltas bool, asJSON bool) error {
 	redactPlanSummary(s)
 	if asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
+		if showDeltas {
+			if deltas == nil {
+				deltas = []store.LockDelta{}
+			}
+			return enc.Encode(struct {
+				*engine.PlanSummary
+				Deltas []store.LockDelta `json:"deltas"`
+			}{
+				PlanSummary: s,
+				Deltas:      deltas,
+			})
+		}
 		return enc.Encode(s)
 	}
 	prefix := "Sync"
@@ -382,6 +427,10 @@ func printSummary(w io.Writer, s *engine.PlanSummary, dryRun bool, asJSON bool) 
 	}
 	for _, p := range s.Pruned {
 		fmt.Fprintf(w, "  - %s\n", p)
+	}
+	if showDeltas && len(deltas) > 0 {
+		fmt.Fprintln(w, "Dependency updates:")
+		printLockDeltas(w, deltas)
 	}
 	if len(s.SecurityHighlights.Hooks) > 0 || len(s.SecurityHighlights.StdioMCPs) > 0 || len(s.SecurityHighlights.AllowCommands) > 0 || len(s.SecurityHighlights.DenyCommands) > 0 {
 		fmt.Fprintln(w, "Security / executable items:")
@@ -402,4 +451,33 @@ func printSummary(w io.Writer, s *engine.PlanSummary, dryRun bool, asJSON bool) 
 		fmt.Fprintf(w, "warning: %s\n", diff.RedactSecrets(warn))
 	}
 	return nil
+}
+
+func printLockDeltas(w io.Writer, deltas []store.LockDelta) {
+	for _, d := range deltas {
+		switch d.Action {
+		case "added":
+			if d.Ref != "" {
+				fmt.Fprintf(w, "  %s: added %s (ref %s, %s)\n", d.Key, d.NewSHA, d.Ref, d.NewHash)
+			} else {
+				fmt.Fprintf(w, "  %s: added %s (%s)\n", d.Key, d.NewSHA, d.NewHash)
+			}
+		case "updated":
+			fmt.Fprintf(w, "  %s: %s..%s (%s -> %s)\n", d.Key, d.OldSHA, d.NewSHA, d.OldHash, d.NewHash)
+		case "removed":
+			fmt.Fprintf(w, "  %s: removed (%s)\n", d.Key, d.OldSHA)
+		case "unchanged":
+			if d.Pinned {
+				ref := d.Ref
+				if ref == "" {
+					ref = d.NewSHA
+				}
+				fmt.Fprintf(w, "  %s: unchanged (pinned to %s)\n", d.Key, ref)
+			} else {
+				fmt.Fprintf(w, "  %s: unchanged (%s)\n", d.Key, d.NewSHA)
+			}
+		default:
+			fmt.Fprintf(w, "  %s: %s\n", d.Key, d.Action)
+		}
+	}
 }
