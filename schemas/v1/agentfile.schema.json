@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bettertux007/agentfile/schemas/v1/agentfile.schema.json",
+  "title": "Agentfile v1 Manifest",
+  "description": "Declarative project manifest (Agentfile.yaml) for compiling isolated AI coding agent configurations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "targets"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "default": 1,
+      "description": "Manifest schema version. Must be integer 1."
+    },
+    "targets": {
+      "type": "array",
+      "description": "Explicit list of target coding agents to compile configurations for.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["claude", "opencode", "gemini", "cursor"]
+      },
+      "examples": [
+        ["claude", "opencode"],
+        ["claude", "opencode", "gemini", "cursor"]
+      ]
+    },
+    "mcp": {
+      "type": "object",
+      "description": "Project-scoped MCP server definitions keyed by server name slug.",
+      "propertyNames": {
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/mcpServer"
+      }
+    },
+    "skills": {
+      "type": "array",
+      "description": "Reusable SKILL.md directory assets from workspace paths or Git repositories.",
+      "items": {
+        "$ref": "#/$defs/asset"
+      }
+    },
+    "agents": {
+      "type": "array",
+      "description": "Subagent Markdown definitions.",
+      "items": {
+        "$ref": "#/$defs/agent"
+      }
+    },
+    "rules": {
+      "type": "array",
+      "description": "Project instruction and rule Markdown definitions.",
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    },
+    "settings": {
+      "$ref": "#/$defs/settings"
+    },
+    "targets_config": {
+      "type": "object",
+      "description": "Per-target compiler behavior overrides and unsupported-feature degradation policy.",
+      "propertyNames": {
+        "enum": ["claude", "opencode", "gemini", "cursor"]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/targetConfig"
+      }
+    }
+  },
+  "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+      "description": "Filesystem-safe identifier starting with an alphanumeric character."
+    },
+    "source": {
+      "description": "Local workspace path (./...) or Git source (<repo_url>[#<ref>][//<subpath>] or {git, ref, path}).",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "examples": [
+            "./local/skills/terraform-auditor",
+            "https://github.com/org/agent-skills.git#v1.0.0//skills/k8s-hardening",
+            "git@github.com:org/agent-skills.git#main//skills/k8s-hardening"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["git"],
+          "properties": {
+            "git": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Git repository URL (https://, ssh://, or git@host:path)."
+            },
+            "ref": {
+              "type": "string",
+              "description": "Optional branch, tag, or 40-character commit SHA (defaults to HEAD)."
+            },
+            "path": {
+              "type": "string",
+              "description": "Optional relative subdirectory or file path inside the repository."
+            }
+          }
+        }
+      ]
+    },
+    "mcpServer": {
+      "type": "object",
+      "description": "MCP server transport and connection configuration.",
+      "additionalProperties": false,
+      "required": ["transport"],
+      "properties": {
+        "transport": {
+          "type": "string",
+          "enum": ["stdio", "http", "sse"],
+          "description": "MCP transport type."
+        },
+        "command": {
+          "type": "string",
+          "description": "Executable to launch for stdio transport (supports ${ENV_VAR} placeholders)."
+        },
+        "args": {
+          "type": "array",
+          "description": "Command-line arguments for stdio transport.",
+          "items": { "type": "string" }
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment variables passed to stdio server process.",
+          "additionalProperties": { "type": "string" }
+        },
+        "url": {
+          "type": "string",
+          "description": "Endpoint URL for http or sse transport."
+        },
+        "headers": {
+          "type": "object",
+          "description": "HTTP headers sent for http or sse transport (supports ${ENV_VAR} placeholders).",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "transport": { "const": "stdio" } } },
+          "then": {
+            "required": ["command"],
+            "not": {
+              "anyOf": [{ "required": ["url"] }, { "required": ["headers"] }]
+            }
+          }
+        },
+        {
+          "if": { "properties": { "transport": { "enum": ["http", "sse"] } } },
+          "then": {
+            "required": ["url"],
+            "not": {
+              "anyOf": [
+                { "required": ["command"] },
+                { "required": ["args"] },
+                { "required": ["env"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source"],
+      "properties": {
+        "name": { "$ref": "#/$defs/slug" },
+        "source": { "$ref": "#/$defs/source" }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source"],
+      "properties": {
+        "name": { "$ref": "#/$defs/slug" },
+        "description": {
+          "type": "string",
+          "description": "Human/agent description injected into frontmatter when absent."
+        },
+        "model": {
+          "type": "string",
+          "description": "Optional preferred model identifier (e.g., sonnet)."
+        },
+        "source": { "$ref": "#/$defs/source" }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source"],
+      "properties": {
+        "name": { "$ref": "#/$defs/slug" },
+        "source": { "$ref": "#/$defs/source" },
+        "description": {
+          "type": "string",
+          "description": "Short summary used in rule frontmatter or headings."
+        },
+        "globs": {
+          "type": "array",
+          "description": "File glob patterns scoping when the rule applies.",
+          "items": { "type": "string" },
+          "examples": [["**/*.go", "**/*.tf"]]
+        },
+        "always_apply": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether targets such as Cursor mark the rule as alwaysApply: true."
+        }
+      }
+    },
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "matcher": {
+          "type": "string",
+          "description": "Optional tool matcher pattern (e.g., Bash)."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell command executed when the hook triggers."
+        },
+        "enforce": {
+          "type": "boolean",
+          "default": false,
+          "description": "Mark hook as an enforced security control (PreToolUse hooks are always enforced)."
+        }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "description": "Permissions and lifecycle hooks compiled across supported targets.",
+      "additionalProperties": false,
+      "properties": {
+        "permissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow_commands": {
+              "type": "array",
+              "description": "Command patterns explicitly permitted without confirmation.",
+              "items": { "type": "string" }
+            },
+            "deny_commands": {
+              "type": "array",
+              "description": "Command patterns blocked as enforced security controls (fail-closed across targets unless overridden).",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "hooks": {
+          "type": "object",
+          "description": "Lifecycle hooks keyed by event name (e.g., SessionStart, PreToolUse).",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/hook" }
+          }
+        }
+      }
+    },
+    "targetConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "on_unsupported": {
+          "type": "string",
+          "enum": ["fail", "warn"],
+          "default": "fail",
+          "description": "Policy when an enforced security control or env default modifier cannot be represented on this target."
+        },
+        "on_isolation_unsupported": {
+          "type": "string",
+          "enum": ["fail", "warn"],
+          "default": "fail",
+          "description": "Policy when load_global: false cannot be safely enforced for this target at launch time."
+        },
+        "load_global": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether agentfile run loads native user-global configs for this target (default true)."
+        },
+        "rules_mode": {
+          "type": "string",
+          "enum": ["dropin"],
+          "default": "dropin",
+          "description": "Rule emission mode (dropin)."
+        },
+        "overrides": {
+          "type": "object",
+          "description": "Additional target-native top-level JSON keys merged into that target's compiled config."
+        }
+      }
+    }
+  }
+}

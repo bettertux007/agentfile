@@ -32,3 +32,11 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# EGM brainstorm, draft, and review artifacts
+.egm/
+
+# Local build & OS artifacts
+/agentfile
+/dist/
+.DS_Store

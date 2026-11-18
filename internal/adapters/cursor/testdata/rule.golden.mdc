@@ -1,0 +1,7 @@
+---
+description: Go rules
+globs: '**/*.go, **/*.tf'
+alwaysApply: false
+---
+
+Always run go test.

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bettertux007/agentfile/schemas/v1/agentfile-lock.schema.json",
+  "title": "Agentfile Lockfile (v1)",
+  "description": "Deterministic lockfile (Agentfile.lock) pinning remote Git dependencies.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "dependencies"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "default": 1,
+      "description": "Lockfile schema version. Must be integer 1."
+    },
+    "dependencies": {
+      "type": "object",
+      "description": "Pinned remote dependencies keyed by <kind>:<name>.",
+      "propertyNames": {
+        "pattern": "^(skill|agent|rule):[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/lockEntry"
+      }
+    }
+  },
+  "$defs": {
+    "lockEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "commit_sha", "content_hash"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonicalized Git repository URL (credentials stripped)."
+        },
+        "ref": {
+          "type": "string",
+          "description": "Requested Git branch, tag, or commit SHA from Agentfile.yaml."
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "Resolved 40-character lowercase Git commit SHA."
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Canonical tree SHA-256 hash of the extracted dependency."
+        }
+      }
+    }
+  }
+}
