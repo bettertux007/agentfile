@@ -68,18 +68,51 @@ dependencies:
 
 ---
 
-## 3. `.agentfile/config.yaml` (`version: 1`)
+## 3. Tool Configuration (`config.yaml`, `version: 1`)
 
-Optional machine-local tool preferences (excluded from Git via `<git-common-dir>/info/exclude` when `git_exclude: true`):
+Machine-local and personal workflow preferences share the `version: 1` config schema (`schemas/v1/agentfile-config.schema.json`) and stay separate from committed `Agentfile.yaml` and `Agentfile.lock`:
 
 ```yaml
 # yaml-language-server: $schema=../schemas/v1/agentfile-config.schema.json
 version: 1
 link_mode: copy       # copy (default) | symlink (workspace-local sources only)
-on_conflict: ask      # ask (interactive TTY default) | fail (non-TTY/CI default) | backup | overwrite
+on_conflict: ask      # ask (interactive non-CI TTY default) | fail (non-TTY/CI default) | backup | overwrite
 git_exclude: true     # true (default) | false
 load_global: true     # true (default) | false (machine-local runtime isolation default)
 ```
+
+### Configuration Layers & Precedence
+
+`agentfile` merges 4 configuration layers for `link_mode`, `on_conflict`, and `git_exclude`:
+
+1. **Built-in defaults:** `link_mode: copy`, `git_exclude: true`, and `on_conflict: ask` (in interactive non-CI TTYs) or `fail` (in non-TTY or CI environments).
+2. **User-global config:** `~/.config/agentfile/config.yaml` (personal defaults across repositories).
+3. **Repo-local config:** `.agentfile/config.yaml` (excluded from Git via `<git-common-dir>/info/exclude` when `git_exclude: true`).
+4. **CLI flags:** `--link-mode`, `--copy`, `--on-conflict`, `--force`, and `--git-exclude`.
+
+Note: Setting `on_conflict: overwrite` in the user-global config emits a warning because unmanaged local edits may be overwritten without prompting.
+
+### User-Global Config Discovery & CI Isolation
+
+`agentfile` resolves the user-global config file using the following precedence:
+
+1. `AGENTFILE_NO_USER_CONFIG=1`: Disables user-global config loading completely (takes precedence over `AGENTFILE_CONFIG_FILE`).
+2. `AGENTFILE_CONFIG_FILE=<path>`: Loads `<path>` explicitly (even when CI variables are set). Fails closed with exit `2` if the file does not exist, cannot be read, or is a directory.
+3. **CI auto-isolation:** If any of `CI`, `GITHUB_ACTIONS`, `BUILDKITE`, `GITLAB_CI`, or `CIRCLECI` is non-empty, default user-global config discovery is skipped so CI runs stay reproducible.
+4. `$XDG_CONFIG_HOME/agentfile/config.yaml` (when `XDG_CONFIG_HOME` is set).
+5. `$HOME/.config/agentfile/config.yaml` (Unix/macOS).
+6. `<os.UserConfigDir()>/agentfile/config.yaml` fallback (e.g., `%AppData%\agentfile\config.yaml` on Windows).
+
+### `load_global` Precedence & Non-Downgrade Rule
+
+Per-target `load_global` resolution for `agentfile run`, `agentfile status`, `agentfile sync`, and `agentfile doctor` follows this order:
+
+`CLI (--no-global / --load-global)` > `Agentfile.yaml (load_global: false)` > `local_config (.agentfile/config.yaml)` > `Agentfile.yaml (load_global: true)` > `user_config (~/.config/agentfile/config.yaml)` > `default (true)`
+
+* **Security non-downgrade:** If `Agentfile.yaml` sets `targets_config.<target>.load_global: false`, neither `.agentfile/config.yaml` nor `~/.config/agentfile/config.yaml` (`load_global: true`) can weaken it; `agentfile` keeps `load_global=false` and emits a warning. Only an explicit CLI `--load-global` flag can override `Agentfile.yaml`'s `load_global: false` (also emitting a `stderr` warning).
+* **Local tightening:** When `Agentfile.yaml` sets `load_global: true` or omits it, `.agentfile/config.yaml` or `~/.config/agentfile/config.yaml` can set `load_global: false` to enforce runtime isolation locally.
+
+---
 
 ## 4. IDE Autocomplete
 

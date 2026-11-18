@@ -1,10 +1,14 @@
 # CLI Reference
 
+## Global Flags
+
+* `-v`, `--verbose`: Enable verbose diagnostic output.
+
 ## Exit Codes
 
 * `0`: Success
 * `1`: Runtime or filesystem/Git I/O error
-* `2`: Manifest/schema validation error, security policy rejection, lockfile mismatch, unresolved conflict, or CLI flag error
+* `2`: Manifest/schema validation error, security policy rejection, lockfile mismatch, unresolved conflict, or CLI usage error
 
 ---
 
@@ -36,16 +40,110 @@ agentfile sync [flags]
 * `--on-conflict <ask|fail|backup|overwrite>`: Override collision policy for unmanaged files or user-edited managed keys/blocks.
 * `--force`: Alias for `--on-conflict=overwrite` (does not bypass lockfile or security policy checks).
 * `--git-exclude[=true|false]`: Enable or disable `<git-common-dir>/info/exclude` management.
-* `--update[=<kind:name>]`: Re-resolve all remote dependencies (`--update`) or a single dependency (`--update=skill:k8s-hardening`) and update `Agentfile.lock`.
+* `--update[=<kind:name>]`: Re-resolve all remote dependencies (`--update`) or a single dependency (`--update=skill:k8s-hardening`), update `Agentfile.lock`, and print lockfile deltas (`added`, `updated`, `removed`, `unchanged`; emitted as `deltas` in `--json` output).
 * `--allow-external-local`: Permit local paths outside the repository root (`../...` or absolute paths).
 * `--dry-run`: Plan all operations without writing workspace files or `Agentfile.lock`.
 * `--json`: Emit the summary as JSON (for `--dry-run` or `sync`).
 
 ---
 
+## `agentfile status`
+
+Performs a read-only inspection of `Agentfile.yaml`, `Agentfile.lock`, resolved configuration (`.agentfile/config.yaml` and user-global config), local/remote dependency hydration, `.agentfile/commit-journal.json` state, workspace drift, unmanaged/edited conflicts, and per-target `load_global`/isolation status without invoking Git or mutating files.
+
+```sh
+agentfile status [--targets <list>] [--check] [--json]
+```
+
+* `--targets <list>`: Comma-separated subset of targets to inspect.
+* `--check`: Exit `2` if `Agentfile.yaml` is invalid, `Agentfile.lock` is `missing`/`out_of_sync`/`invalid`, a pending commit journal exists, dependencies are unhydrated or missing, workspace drift is detected, or any inspected target is not `in_sync` (`drifted`, `unhydrated`, `conflict`, or `not_synced`).
+* `--json`: Emit a structured `StatusReport` JSON object (`manifest_valid`, `schema_errors`, `lock_status`, `effective_config`, `unhydrated_deps`, `missing_local_deps`, `commit_journal_pending`, `drifted`, `drift_reason`, `per_target`, `warnings`).
+
+---
+
+## `agentfile diff`
+
+Previews unified diffs between `Agentfile.yaml` and current workspace files without modifying disk or `Agentfile.lock`. Literal secrets in rendered diffs and warnings are masked (`[REDACTED]`) while preserving `${VAR}`, `{env:VAR}`, and `${env:VAR}` placeholders. Individual files larger than 1 MiB emit a size-difference summary, and total diff output is capped at 10 MiB.
+
+```sh
+agentfile diff [--targets <list>] [--stat | --name-only] [--check] [--fetch]
+```
+
+* `--targets <list>`: Comma-separated subset of targets to diff.
+* `--stat`: Show a diffstat summary (`+`/`-` counts per file and totals) instead of full hunks (mutually exclusive with `--name-only`).
+* `--name-only`: Show only changed file paths (mutually exclusive with `--stat`).
+* `--check`: Exit `2` if any diff is pending, `Agentfile.lock` is `missing`/`out_of_sync`/`invalid`, conflicts exist, or workspace drift is detected.
+* `--fetch`: Hydrate cold remote dependencies into the local cache (`AGENTFILE_CACHE_DIR` or `<UserCacheDir>/agentfile`) without writing `Agentfile.lock`. Without `--fetch`, unhydrated remote dependencies exit `2`.
+
+---
+
+## `agentfile add`
+
+Adds or replaces a `skill`, `agent`, `rule`, or `mcp` entry in `Agentfile.yaml` using comment-preserving YAML AST edits, validates against JSON Schema v1 and `spec.Parse`, and runs a scoped `sync` (reconciling only the added/replaced dependency key in `Agentfile.lock`) unless `--no-sync` is passed.
+
+```sh
+agentfile add skill <name> <source> [flags]
+agentfile add agent <name> <source> [flags]
+agentfile add rule  <name> <source> [flags]
+agentfile add mcp   <name> [flags] [-- <command> [args...]]
+```
+
+Common flags across all `add` subcommands:
+
+* `--replace`: Overwrite an existing entry with the same name (otherwise exits `2`).
+* `--no-sync`: Update `Agentfile.yaml` only without updating `Agentfile.lock` or syncing workspace artifacts.
+* `--on-conflict <ask|fail|backup|overwrite>`: Override collision policy during the automatic sync.
+* `--allow-external-local`: Permit local dependency paths outside the repository root.
+
+Subcommand-specific flags:
+
+* `add agent`: `--description <text>`, `--model <model>`
+* `add rule`: `--description <text>`, `--globs <pattern1,pattern2>`, `--always-apply`
+* `add mcp`:
+  * `--transport <stdio|http|sse>`: Transport type (inferred as `stdio` from `-- <command>` or `http` from `--url` if omitted).
+  * `--url <url>`: Endpoint URL (required for `http`/`sse`; cannot be combined with `-- <command>`).
+  * `--env <KEY=VAL>`: Environment variable for `stdio` servers (repeatable).
+  * `--env-ref <VAR>`: Environment variable reference for `stdio` servers, emitted as `VAR: "${VAR}"` (repeatable).
+  * `--header <Name: Value>`: HTTP header for `http`/`sse` servers (repeatable).
+  * `--header-env <VAR:HEADER>`: Header env reference for `http`/`sse` servers; emits `Authorization: Bearer ${VAR}` for `Authorization` and `${VAR}` for other headers (repeatable).
+  * Literal secrets in `--url`, `-- <command> [args...]`, `--env`, or `--header` are rejected with exit `2` (use `--env-ref`, `--header-env`, or single-quoted `'${VAR}'` placeholders instead).
+
+---
+
+## `agentfile remove`
+
+Removes a named `skill`, `agent`, `rule`, or `mcp` entry from `Agentfile.yaml` while preserving surrounding comments, and syncs `Agentfile.lock` and workspace artifacts (pruning orphaned files/entries) unless `--no-sync` is passed. Exits `2` if the kind is invalid or the entry does not exist.
+
+```sh
+agentfile remove <skill|agent|rule|mcp> <name> [flags]
+```
+
+* `--no-sync`: Update `Agentfile.yaml` only without updating `Agentfile.lock` or pruning workspace artifacts.
+* `--on-conflict <ask|fail|backup|overwrite>`: Override collision policy during the automatic sync.
+* `--allow-external-local`: Permit local dependency paths outside the repository root.
+
+---
+
+## `agentfile upgrade`
+
+Re-resolves remote Git dependencies (all remote dependencies by default, or a single dependency specified as `<kind>:<name>` or `<kind> <name>`), updates `Agentfile.lock`, syncs workspace configurations, and prints per-dependency lockfile deltas (`added`, `updated`, `removed`, `unchanged`). Dependencies pinned to an explicit commit SHA remain unchanged (`pinned: true`).
+
+```sh
+agentfile upgrade [<kind>:<name> | <kind> <name>] [flags]
+```
+
+* `--targets <list>`: Comma-separated subset of targets to sync.
+* `--dry-run`: Preview lockfile deltas and workspace changes without writing files.
+* `--on-conflict <ask|fail|backup|overwrite>`: Override collision policy.
+* `--force`: Alias for `--on-conflict=overwrite`.
+* `--allow-external-local`: Permit local dependency paths outside the repository root.
+* `--json`: Emit `UpgradeReport` JSON (`deltas` and `summary`).
+
+---
+
 ## `agentfile doctor`
 
-Validates `Agentfile.yaml` against the embedded JSON Schema v1 (`schemas/v1/agentfile.schema.json`) and `spec.ParseFile`, checks `Agentfile.lock`, probes installed target CLIs against `SchemaContract` (`MinVersion` and `MinIsolationVersion`), displays the resolved `.agentfile/config.yaml` and per-target `load_global`/`isolation_mode` state, and inspects user-global configs read-only (`~/.claude.json`, `~/.claude/{skills,agents,rules,CLAUDE.md}`, `~/.config/opencode/`, `~/.agents/skills`, `~/.gemini/`, `~/.cursor/`) for shadowing MCP servers and non-empty global skills/rules/agents.
+Validates `Agentfile.yaml` against the embedded JSON Schema v1 (`schemas/v1/agentfile.schema.json`) and `spec.ParseFile`, checks `Agentfile.lock`, probes installed target CLIs against `SchemaContract` (`MinVersion` and `MinIsolationVersion`), displays the resolved `.agentfile/config.yaml` and user-global config (`~/.config/agentfile/config.yaml` when active) with per-field provenance and per-target `load_global`/`isolation_mode` state, and inspects user-global configs read-only (`~/.claude.json`, `~/.claude/{skills,agents,rules,CLAUDE.md}`, `~/.config/opencode/`, `~/.agents/skills`, `~/.gemini/`, `~/.cursor/`) for shadowing MCP servers and non-empty global skills/rules/agents.
 
 ```sh
 agentfile doctor [--json]

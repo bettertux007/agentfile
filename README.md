@@ -19,10 +19,16 @@ agentfile sync --dry-run
 # 3. Resolve dependencies, update Agentfile.lock, and compile target configs
 agentfile sync
 
-# 4. Validate manifest, lockfile, installed CLIs, and global config shadowing
+# 4. Inspect manifest, lockfile, hydration, drift, and isolation status (read-only)
+agentfile status
+
+# 5. Preview unified diffs between Agentfile.yaml and workspace files
+agentfile diff
+
+# 6. Validate manifest, lockfile, installed CLIs, and global config shadowing
 agentfile doctor
 
-# 5. Remove agentfile-managed workspace artifacts cleanly
+# 7. Remove agentfile-managed workspace artifacts cleanly
 agentfile clean
 ```
 
@@ -33,16 +39,21 @@ See [examples/starter/README.md](examples/starter/README.md) and [examples/start
 | Command | Flags | Description |
 | :--- | :--- | :--- |
 | `agentfile init` | `--minimal`, `--full`, `--force` | Scaffolds `Agentfile.yaml` with targets detected on `$PATH`. |
-| `agentfile sync` | `--targets`, `--link-mode`, `--copy`, `--on-conflict`, `--git-exclude`, `--update[=<kind:name>]`, `--dry-run`, `--force`, `--allow-external-local`, `--json` | Resolves dependencies, verifies `Agentfile.lock`, compiles target configs, and updates worktree Git excludes. |
-| `agentfile doctor` | `--json` | Validates `Agentfile.yaml` against JSON Schema v1, checks `Agentfile.lock`, probes installed target CLIs (`MinVersion` / `MinIsolationVersion`), prints `.agentfile/config.yaml`, and warns on shadowing global MCPs, skills, rules, and agents. |
+| `agentfile sync` | `--targets`, `--link-mode`, `--copy`, `--on-conflict`, `--git-exclude`, `--update[=<kind:name>]`, `--dry-run`, `--force`, `--allow-external-local`, `--json` | Resolves dependencies, verifies `Agentfile.lock`, compiles target configs, prints lock deltas on `--update`, and updates worktree Git excludes. |
+| `agentfile status` | `--targets`, `--check`, `--json` | Read-only check of manifest validity, lockfile alignment, config sources, dependency hydration, workspace drift, conflicts, and per-target isolation. |
+| `agentfile diff` | `--targets`, `--stat`, `--name-only`, `--check`, `--fetch` | Previews secret-redacted unified diffs (or diffstat/paths) between `Agentfile.yaml` and workspace files without modifying disk or `Agentfile.lock`. |
+| `agentfile add` | `skill\|agent\|rule\|mcp`, `--replace`, `--no-sync`, `--on-conflict`, `--allow-external-local` | Adds or replaces an entry in `Agentfile.yaml` (preserving comments), rejects literal secrets, and reconciles `Agentfile.lock` + workspace via sync. |
+| `agentfile remove` | `<skill\|agent\|rule\|mcp> <name>`, `--no-sync`, `--on-conflict`, `--allow-external-local` | Removes an entry from `Agentfile.yaml` and prunes orphaned lockfile entries and workspace artifacts. |
+| `agentfile upgrade` | `[<kind>:<name> \| <kind> <name>]`, `--targets`, `--dry-run`, `--on-conflict`, `--force`, `--allow-external-local`, `--json` | Refreshes remote Git dependencies, updates `Agentfile.lock`, syncs targets, and reports per-dependency lock deltas. |
+| `agentfile doctor` | `--json` | Validates `Agentfile.yaml` against JSON Schema v1, checks `Agentfile.lock`, probes installed target CLIs (`MinVersion` / `MinIsolationVersion`), prints resolved config layers, and warns on shadowing global MCPs, skills, rules, and agents. |
 | `agentfile run` | `--load-global`, `--no-global`, `--sync`, `--no-sync`, `--dry-run`, `--json` | Syncs target configuration and launches `<target>` (forwarding all arguments after `<target>` verbatim) with optional runtime global isolation. |
 | `agentfile clean` | `--dry-run`, `--targets`, `--cache`, `--max-age`, `--json` | Removes tracked workspace artifacts/JSONC patches/excludes, or prunes stale extracted cache entries when `--cache` is passed. |
 
 Exit codes: `0` success, `1` I/O or runtime error, `2` validation, security policy, lockfile mismatch, conflict failure, or CLI usage error.
 
-## Local Tool Configuration (`.agentfile/config.yaml`)
+## Local & User-Global Tool Configuration (`config.yaml`)
 
-Personal workflow preferences stay separate from committed `Agentfile.yaml` and `Agentfile.lock` in `.agentfile/config.yaml` (automatically excluded via `<git-common-dir>/info/exclude` when `git_exclude: true`):
+Personal workflow preferences stay separate from committed `Agentfile.yaml` and `Agentfile.lock` in `~/.config/agentfile/config.yaml` (user-global defaults) and `.agentfile/config.yaml` (repo-local overrides, automatically excluded via `<git-common-dir>/info/exclude` when `git_exclude: true`):
 
 ```yaml
 version: 1
@@ -52,7 +63,9 @@ git_exclude: true     # true (default) | false
 load_global: true     # true (default) | false (machine-local runtime isolation default)
 ```
 
-CLI flags (`--link-mode`, `--copy`, `--on-conflict`, `--git-exclude`, `--force`) override `.agentfile/config.yaml`.
+* **4-layer precedence:** `default` -> `user_config` (`~/.config/agentfile/config.yaml` or `$XDG_CONFIG_HOME/agentfile/config.yaml`) -> `local_config` (`.agentfile/config.yaml`) -> CLI flags (`--link-mode`, `--copy`, `--on-conflict`, `--git-exclude`, `--force`).
+* **User-global env controls & CI isolation:** `AGENTFILE_NO_USER_CONFIG=1` disables user-global config; `AGENTFILE_CONFIG_FILE=<path>` forces an explicit config file (fail-closed if missing); CI environments (`CI`, `GITHUB_ACTIONS`, `BUILDKITE`, `GITLAB_CI`, `CIRCLECI`) automatically skip default user-global discovery.
+* **`load_global` non-downgrade:** `CLI` > `Agentfile.yaml (load_global: false)` > `local_config` > `Agentfile.yaml (load_global: true)` > `user_config` > `default (true)`. See [docs/configuration.md](docs/configuration.md) for full details.
 
 ## Architecture
 
