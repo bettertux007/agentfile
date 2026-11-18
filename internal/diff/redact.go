@@ -27,8 +27,9 @@ var (
 		`(?i)(["'])(` + secretKeyPattern + `)(["']\s*:\s*)(?:"((?:\\.|[^"\\\n])*)"|'((?:\\.|[^'\\\n])*)')`,
 	)
 	reUnquotedKV = regexp.MustCompile(
-		`(?i)(^|[\s,{(\[&?;])((?:--?)?` + secretKeyPattern + `)(\s*[:=]\s*)(?:"((?:\\.|[^"\\\n])*)"|'((?:\\.|[^'\\\n])*)'|(\[REDACTED\]|[^\s,;}\]&"'\n]+))`,
+		`(?i)(^|[\s,{(\[&?;])((?:--?)?` + secretKeyPattern + `)([ \t]*[:=][ \t]*)(?:"((?:\\.|[^"\\\n])*)"|'((?:\\.|[^'\\\n])*)'|(\[REDACTED\]|[^\s,;}\]&"'\n]+))`,
 	)
+	reHunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 )
 
 // RedactSecrets masks literal credential values in text while preserving env-var
@@ -87,14 +88,41 @@ func RedactUnifiedDiff(diffText string) string {
 		return ""
 	}
 	lines := strings.Split(diffText, "\n")
+	oldRem, newRem := 0, 0
 	for i, line := range lines {
-		switch {
-		case line == "":
+		if oldRem > 0 || newRem > 0 {
+			switch {
+			case line == `\ No newline at end of file`:
+				continue
+			case strings.HasPrefix(line, "-"):
+				oldRem--
+				lines[i] = "-" + RedactSecrets(line[1:])
+				continue
+			case strings.HasPrefix(line, "+"):
+				newRem--
+				lines[i] = "+" + RedactSecrets(line[1:])
+				continue
+			case strings.HasPrefix(line, " "):
+				oldRem--
+				newRem--
+				lines[i] = " " + RedactSecrets(line[1:])
+				continue
+			default:
+				// Unexpected non-hunk line; reset hunk state and handle normally.
+				oldRem, newRem = 0, 0
+			}
+		}
+
+		if sub := reHunkHeader.FindStringSubmatch(line); len(sub) == 5 {
+			oldRem = parseHunkCount(sub[2])
+			newRem = parseHunkCount(sub[4])
 			continue
-		case strings.HasPrefix(line, "--- "),
-			strings.HasPrefix(line, "+++ "),
-			strings.HasPrefix(line, "@@ "),
-			line == `\ No newline at end of file`:
+		}
+
+		switch {
+		case line == "",
+			line == `\ No newline at end of file`,
+			isDiffFileHeader(line):
 			continue
 		case strings.HasPrefix(line, "+"),
 			strings.HasPrefix(line, "-"),
@@ -105,6 +133,24 @@ func RedactUnifiedDiff(diffText string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func isDiffFileHeader(line string) bool {
+	return strings.HasPrefix(line, "--- a/") ||
+		line == "--- /dev/null" ||
+		strings.HasPrefix(line, "+++ b/") ||
+		line == "+++ /dev/null"
+}
+
+func parseHunkCount(s string) int {
+	if s == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // ContainsLiteralSecret reports whether s contains a non-placeholder literal secret

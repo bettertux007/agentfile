@@ -339,6 +339,21 @@ func TestRedactSecretsAndPlaceholders(t *testing.T) {
 			in:   `"GITHUB_TOKEN": "${TOKEN:-ghp_secret123456}"`,
 			want: `"GITHUB_TOKEN": "${TOKEN:-[REDACTED]}"`,
 		},
+		{
+			name: "empty env value does not cross newline",
+			in:   "TOKEN=\nPORT=8080",
+			want: "TOKEN=\nPORT=8080",
+		},
+		{
+			name: "YAML parent key does not cross newline",
+			in:   "auth:\n  method: oidc",
+			want: "auth:\n  method: oidc",
+		},
+		{
+			name: "empty env value with trailing spaces does not cross newline",
+			in:   "API_KEY=   \nHOST=localhost",
+			want: "API_KEY=   \nHOST=localhost",
+		},
 	}
 
 	for _, tc := range tests {
@@ -382,6 +397,41 @@ func TestRedactUnifiedDiffSecretRotation(t *testing.T) {
 	}
 }
 
+func TestRedactUnifiedDiffDoubleDashAndPlusContentLines(t *testing.T) {
+	oldSQL := []byte("-- password=rawsecret\n-- a/path token=rawtok1\nselect 1;\n")
+	newSQL := []byte("++ token=rawtok2\n++ b/path api_key=rawkey3\nselect 1;\n")
+
+	rawDiff, changed, err := UnifiedDiff("query.sql", oldSQL, newSQL, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected changed=true")
+	}
+
+	redacted := RedactUnifiedDiff(rawDiff)
+	for _, secret := range []string{"rawsecret", "rawtok1", "rawtok2", "rawkey3"} {
+		if strings.Contains(redacted, secret) {
+			t.Fatalf("secret %q leaked in redacted diff:\n%s", secret, redacted)
+		}
+	}
+	if !strings.Contains(redacted, "--- a/query.sql\n+++ b/query.sql\n") {
+		t.Fatalf("expected file headers preserved:\n%s", redacted)
+	}
+	if !strings.Contains(redacted, "--- password=[REDACTED]\n") {
+		t.Fatalf("expected deleted '-- password=...' line redacted:\n%s", redacted)
+	}
+	if !strings.Contains(redacted, "--- a/path token=[REDACTED]\n") {
+		t.Fatalf("expected deleted '-- a/path token=...' line inside hunk redacted:\n%s", redacted)
+	}
+	if !strings.Contains(redacted, "+++ token=[REDACTED]\n") {
+		t.Fatalf("expected added '++ token=...' line redacted:\n%s", redacted)
+	}
+	if !strings.Contains(redacted, "+++ b/path api_key=[REDACTED]\n") {
+		t.Fatalf("expected added '++ b/path api_key=...' line inside hunk redacted:\n%s", redacted)
+	}
+}
+
 func TestContainsLiteralSecret(t *testing.T) {
 	shouldDetect := []string{
 		"ghp_secret123456",
@@ -404,6 +454,8 @@ func TestContainsLiteralSecret(t *testing.T) {
 		"${LOG_LEVEL:-info}",
 		"https://user:${PASS}@host",
 		"Authorization: Bearer [REDACTED]",
+		"TOKEN=\nPORT=8080",
+		"auth:\n  method: oidc",
 	}
 	for _, s := range shouldIgnore {
 		if ContainsLiteralSecret(s) {
