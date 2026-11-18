@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -88,6 +89,43 @@ type ResolvedAsset struct {
 	LockUpdated bool
 }
 
+// LockDelta describes a change (or pinned no-op) to a remote lockfile entry during resolution.
+type LockDelta struct {
+	Key     string `json:"key"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name"`
+	Action  string `json:"action"` // "added" | "updated" | "removed" | "unchanged"
+	Ref     string `json:"ref,omitempty"`
+	Pinned  bool   `json:"pinned"`
+	OldSHA  string `json:"old_sha,omitempty"`
+	NewSHA  string `json:"new_sha,omitempty"`
+	OldHash string `json:"old_hash,omitempty"`
+	NewHash string `json:"new_hash,omitempty"`
+}
+
+// InspectReport describes read-only dependency and lockfile inspection results.
+type InspectReport struct {
+	Assets       map[string]ResolvedAsset
+	Unhydrated   []string
+	MissingLocal []string
+	LockStatus   string // "ok" | "not_required" | "missing" | "out_of_sync" | "invalid"
+	LockError    error
+}
+
+// ResolveOptions configures dependency resolution and lockfile reconciliation.
+type ResolveOptions struct {
+	UpdateTarget string
+	ReconcileKey string
+	ParseOpts    ParseOptions
+}
+
+// ResolveResult holds resolved assets, the resulting lockfile, and per-dependency lock deltas.
+type ResolveResult struct {
+	Assets   map[string]ResolvedAsset
+	NextLock *spec.Lockfile
+	Deltas   []LockDelta
+}
+
 // Store manages the local dependency cache and extracted content-addressed store.
 type Store struct {
 	RootDir string
@@ -119,6 +157,116 @@ func NewDefaultStore() (*Store, error) {
 	}, nil
 }
 
+// InspectDependencies performs a strictly read-only inspection of local paths,
+// cached remote trees, and lockfile alignment without invoking git, acquiring locks,
+// touching .last_used timestamps, or deleting corrupt cache entries.
+func (s *Store) InspectDependencies(
+	projectRoot string,
+	ps *spec.ProjectSpec,
+	lf *spec.Lockfile,
+	parseOpts ParseOptions,
+) (*InspectReport, error) {
+	if ps == nil {
+		return nil, spec.NewPolicyError("ProjectSpec is nil")
+	}
+
+	rep := &InspectReport{
+		Assets: make(map[string]ResolvedAsset),
+	}
+	hasRemote := false
+
+	inspectItem := func(kind, name string, src spec.SourceSpec) error {
+		key := spec.LockKey(kind, name)
+		parsed, err := ParseSource(src, projectRoot, parseOpts)
+		if err != nil {
+			return err
+		}
+		if parsed.IsLocal {
+			if _, err := os.Stat(parsed.LocalPath); err != nil {
+				rep.MissingLocal = append(rep.MissingLocal, key)
+				return nil
+			}
+			rep.Assets[key] = ResolvedAsset{
+				Kind:       kind,
+				Name:       name,
+				IsRemote:   false,
+				SourcePath: parsed.LocalPath,
+				LockKey:    key,
+			}
+			return nil
+		}
+
+		hasRemote = true
+		if lf == nil {
+			rep.Unhydrated = append(rep.Unhydrated, key)
+			return nil
+		}
+		entry, ok := lf.Dependencies[key]
+		if !ok || entry.Source != parsed.CanonicalURL || entry.Ref != parsed.Ref || entry.CommitSHA == "" || entry.ContentHash == "" {
+			rep.Unhydrated = append(rep.Unhydrated, key)
+			return nil
+		}
+		extractedDir := s.extractedPath(entry.ContentHash)
+		info, err := os.Stat(extractedDir)
+		if err != nil || !info.IsDir() {
+			rep.Unhydrated = append(rep.Unhydrated, key)
+			return nil
+		}
+		actualHash, herr := HashTree(extractedDir)
+		if herr != nil || actualHash != entry.ContentHash {
+			rep.Unhydrated = append(rep.Unhydrated, key)
+			return nil
+		}
+		rep.Assets[key] = ResolvedAsset{
+			Kind:       kind,
+			Name:       name,
+			IsRemote:   true,
+			SourcePath: extractedDir,
+			LockKey:    key,
+			LockEntry:  entry,
+		}
+		return nil
+	}
+
+	for _, sk := range ps.Skills {
+		if err := inspectItem("skill", sk.Name, sk.Source); err != nil {
+			return nil, err
+		}
+	}
+	for _, ag := range ps.Agents {
+		if err := inspectItem("agent", ag.Name, ag.Source); err != nil {
+			return nil, err
+		}
+	}
+	for _, rl := range ps.Rules {
+		if err := inspectItem("rule", rl.Name, rl.Source); err != nil {
+			return nil, err
+		}
+	}
+
+	sort.Strings(rep.Unhydrated)
+	sort.Strings(rep.MissingLocal)
+
+	if lf == nil {
+		if !hasRemote {
+			rep.LockStatus = "not_required"
+		} else {
+			rep.LockStatus = "missing"
+			rep.LockError = spec.NewPolicyError("Agentfile.lock is missing (run 'agentfile sync')")
+		}
+		return rep, nil
+	}
+
+	verr := spec.VerifyMatches(lf, ps, sourceInspectorFunc(projectRoot, parseOpts))
+	if verr != nil {
+		rep.LockStatus = "out_of_sync"
+		rep.LockError = verr
+	} else {
+		rep.LockStatus = "ok"
+	}
+	return rep, nil
+}
+
 // ResolveAll resolves all local and remote dependencies for spec, validating or updating lockfile.
 func (s *Store) ResolveAll(
 	ctx context.Context,
@@ -128,8 +276,36 @@ func (s *Store) ResolveAll(
 	updateTarget string,
 	parseOpts ParseOptions,
 ) (map[string]ResolvedAsset, *spec.Lockfile, error) {
+	res, err := s.ResolveWithOptions(ctx, projectRoot, ps, lf, ResolveOptions{
+		UpdateTarget: updateTarget,
+		ParseOpts:    parseOpts,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return res.Assets, res.NextLock, nil
+}
+
+// ResolveWithOptions resolves dependencies with explicit update/reconciliation options
+// and returns per-dependency lock deltas.
+func (s *Store) ResolveWithOptions(
+	ctx context.Context,
+	projectRoot string,
+	ps *spec.ProjectSpec,
+	lf *spec.Lockfile,
+	opts ResolveOptions,
+) (*ResolveResult, error) {
 	if s.Git == nil {
 		s.Git = &ExecGitRunner{}
+	}
+	if ps == nil {
+		return nil, spec.NewPolicyError("ProjectSpec is nil")
+	}
+
+	if opts.UpdateTarget != "" && opts.UpdateTarget != "*" {
+		if err := validateRemoteUpdateTarget(projectRoot, ps, opts.UpdateTarget, opts.ParseOpts); err != nil {
+			return nil, err
+		}
 	}
 
 	nextLock := &spec.Lockfile{
@@ -142,28 +318,28 @@ func (s *Store) ResolveAll(
 		}
 	}
 
-	// Enforce strict lockfile match when Agentfile.lock already exists and --update is absent.
-	if lf != nil && updateTarget == "" {
-		err := spec.VerifyMatches(lf, ps, func(src spec.SourceSpec) (string, string, bool, error) {
-			parsed, err := ParseSource(src, projectRoot, parseOpts)
-			if err != nil {
-				return "", "", false, err
-			}
-			if parsed.IsLocal {
-				return parsed.LocalPath, "", false, nil
-			}
-			return parsed.CanonicalURL, parsed.Ref, true, nil
-		})
-		if err != nil {
-			return nil, nil, err
+	// Enforce lockfile consistency on untouched entries when Agentfile.lock exists
+	// and we are not doing a wildcard update.
+	if lf != nil && opts.UpdateTarget != "*" {
+		inspector := sourceInspectorFunc(projectRoot, opts.ParseOpts)
+		var verr error
+		if opts.UpdateTarget == "" && opts.ReconcileKey == "" {
+			verr = spec.VerifyMatches(lf, ps, inspector)
+		} else {
+			filteredSpec, filteredLock := filterSpecAndLock(ps, lf, opts.UpdateTarget, opts.ReconcileKey)
+			verr = spec.VerifyMatches(filteredLock, filteredSpec, inspector)
+		}
+		if verr != nil {
+			return nil, verr
 		}
 	}
 
 	results := make(map[string]ResolvedAsset)
+	var deltas []LockDelta
 
 	resolveItem := func(kind, name string, src spec.SourceSpec) error {
 		key := spec.LockKey(kind, name)
-		parsed, err := ParseSource(src, projectRoot, parseOpts)
+		parsed, err := ParseSource(src, projectRoot, opts.ParseOpts)
 		if err != nil {
 			return err
 		}
@@ -181,19 +357,23 @@ func (s *Store) ResolveAll(
 			return nil
 		}
 
-		shouldUpdate := lf == nil || updateTarget == "*" || updateTarget == key
+		shouldUpdate := lf == nil || opts.UpdateTarget == "*" || opts.UpdateTarget == key || opts.ReconcileKey == key
+		var prevEntry spec.LockEntry
+		var hadPrev bool
+		if lf != nil {
+			prevEntry, hadPrev = lf.Dependencies[key]
+		}
 		var existing *spec.LockEntry
-		if !shouldUpdate && lf != nil {
-			if e, ok := lf.Dependencies[key]; ok {
-				cp := e
-				existing = &cp
-			}
+		if !shouldUpdate && hadPrev {
+			cp := prevEntry
+			existing = &cp
 		}
 
-		entry, extractedPath, updated, err := s.resolveGit(ctx, parsed, existing)
+		entry, extractedPath, pinned, err := s.resolveGit(ctx, parsed, existing)
 		if err != nil {
 			return err
 		}
+		updated := !hadPrev || prevEntry != entry
 		nextLock.Dependencies[key] = entry
 		results[key] = ResolvedAsset{
 			Kind:        kind,
@@ -204,35 +384,171 @@ func (s *Store) ResolveAll(
 			LockEntry:   entry,
 			LockUpdated: updated,
 		}
+
+		if shouldUpdate {
+			action := "unchanged"
+			if !hadPrev {
+				action = "added"
+			} else if updated {
+				action = "updated"
+			}
+			deltas = append(deltas, LockDelta{
+				Key:     key,
+				Kind:    kind,
+				Name:    name,
+				Action:  action,
+				Ref:     parsed.Ref,
+				Pinned:  pinned,
+				OldSHA:  prevEntry.CommitSHA,
+				NewSHA:  entry.CommitSHA,
+				OldHash: prevEntry.ContentHash,
+				NewHash: entry.ContentHash,
+			})
+		}
 		return nil
 	}
 
 	for _, sk := range ps.Skills {
 		if err := resolveItem("skill", sk.Name, sk.Source); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	for _, ag := range ps.Agents {
 		if err := resolveItem("agent", ag.Name, ag.Source); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	for _, rl := range ps.Rules {
 		if err := resolveItem("rule", rl.Name, rl.Source); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 
-	// Prune removed remote keys from nextLock when updating all or creating fresh.
-	if lf == nil || updateTarget == "*" {
-		for k := range nextLock.Dependencies {
+	// Prune removed remote keys from nextLock when creating fresh, updating all, or reconciling.
+	if lf == nil || opts.UpdateTarget == "*" || opts.ReconcileKey != "" {
+		for k, oldEntry := range nextLock.Dependencies {
 			if res, ok := results[k]; !ok || !res.IsRemote {
 				delete(nextLock.Dependencies, k)
+				kind, name := splitLockKey(k)
+				deltas = append(deltas, LockDelta{
+					Key:     k,
+					Kind:    kind,
+					Name:    name,
+					Action:  "removed",
+					Ref:     oldEntry.Ref,
+					Pinned:  hex40Re.MatchString(oldEntry.Ref),
+					OldSHA:  oldEntry.CommitSHA,
+					OldHash: oldEntry.ContentHash,
+				})
 			}
 		}
 	}
 
-	return results, nextLock, nil
+	sort.Slice(deltas, func(i, j int) bool {
+		return deltas[i].Key < deltas[j].Key
+	})
+
+	return &ResolveResult{
+		Assets:   results,
+		NextLock: nextLock,
+		Deltas:   deltas,
+	}, nil
+}
+
+func sourceInspectorFunc(projectRoot string, parseOpts ParseOptions) spec.SourceInspector {
+	return func(src spec.SourceSpec) (string, string, bool, error) {
+		parsed, err := ParseSource(src, projectRoot, parseOpts)
+		if err != nil {
+			return "", "", false, err
+		}
+		if parsed.IsLocal {
+			return parsed.LocalPath, "", false, nil
+		}
+		return parsed.CanonicalURL, parsed.Ref, true, nil
+	}
+}
+
+func validateRemoteUpdateTarget(projectRoot string, ps *spec.ProjectSpec, target string, parseOpts ParseOptions) error {
+	find := func() (spec.SourceSpec, bool) {
+		for _, sk := range ps.Skills {
+			if spec.LockKey("skill", sk.Name) == target {
+				return sk.Source, true
+			}
+		}
+		for _, ag := range ps.Agents {
+			if spec.LockKey("agent", ag.Name) == target {
+				return ag.Source, true
+			}
+		}
+		for _, rl := range ps.Rules {
+			if spec.LockKey("rule", rl.Name) == target {
+				return rl.Source, true
+			}
+		}
+		return spec.SourceSpec{}, false
+	}
+
+	src, ok := find()
+	if !ok {
+		if strings.HasPrefix(target, "mcp:") {
+			return spec.NewPolicyError("target %q is not a remote Git dependency (MCP servers are not lock-tracked)", target)
+		}
+		return spec.NewPolicyError("unknown update target %q: not found in Agentfile.yaml", target)
+	}
+	parsed, err := ParseSource(src, projectRoot, parseOpts)
+	if err != nil {
+		return err
+	}
+	if parsed.IsLocal {
+		return spec.NewPolicyError("dependency %q is local and cannot be updated from Git", target)
+	}
+	return nil
+}
+
+func filterSpecAndLock(ps *spec.ProjectSpec, lf *spec.Lockfile, excludeKeys ...string) (*spec.ProjectSpec, *spec.Lockfile) {
+	excluded := make(map[string]bool, len(excludeKeys))
+	for _, k := range excludeKeys {
+		if k != "" {
+			excluded[k] = true
+		}
+	}
+	filteredSpec := *ps
+	filteredSpec.Skills = make([]spec.AssetSpec, 0, len(ps.Skills))
+	for _, sk := range ps.Skills {
+		if !excluded[spec.LockKey("skill", sk.Name)] {
+			filteredSpec.Skills = append(filteredSpec.Skills, sk)
+		}
+	}
+	filteredSpec.Agents = make([]spec.AgentSpec, 0, len(ps.Agents))
+	for _, ag := range ps.Agents {
+		if !excluded[spec.LockKey("agent", ag.Name)] {
+			filteredSpec.Agents = append(filteredSpec.Agents, ag)
+		}
+	}
+	filteredSpec.Rules = make([]spec.RuleSpec, 0, len(ps.Rules))
+	for _, rl := range ps.Rules {
+		if !excluded[spec.LockKey("rule", rl.Name)] {
+			filteredSpec.Rules = append(filteredSpec.Rules, rl)
+		}
+	}
+	filteredLock := &spec.Lockfile{
+		Version:      lf.Version,
+		Dependencies: make(map[string]spec.LockEntry, len(lf.Dependencies)),
+	}
+	for k, v := range lf.Dependencies {
+		if !excluded[k] {
+			filteredLock.Dependencies[k] = v
+		}
+	}
+	return &filteredSpec, filteredLock
+}
+
+func splitLockKey(key string) (string, string) {
+	parts := strings.SplitN(key, ":", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "", key
 }
 
 func (s *Store) resolveGit(ctx context.Context, parsed *ParsedSource, locked *spec.LockEntry) (spec.LockEntry, string, bool, error) {
@@ -242,7 +558,7 @@ func (s *Store) resolveGit(ctx context.Context, parsed *ParsedSource, locked *sp
 			actualHash, err := HashTree(extractedDir)
 			if err == nil && actualHash == locked.ContentHash {
 				s.touchLastUsed(locked.ContentHash)
-				return *locked, extractedDir, false, nil
+				return *locked, extractedDir, hex40Re.MatchString(locked.Ref), nil
 			}
 			// Corrupt local cache entry: clean it under lock and re-fetch pinned commit.
 			_ = s.removeExtracted(locked.ContentHash)
@@ -257,10 +573,10 @@ func (s *Store) resolveGit(ctx context.Context, parsed *ParsedSource, locked *sp
 				parsed.CanonicalURL, locked.CommitSHA, locked.ContentHash, entry.ContentHash,
 			)
 		}
-		return entry, extracted, false, nil
+		return entry, extracted, hex40Re.MatchString(locked.Ref), nil
 	}
 
-	commitSHA, err := s.resolveRef(ctx, parsed.GitURL, parsed.Ref)
+	commitSHA, pinned, err := s.resolveRefDetailed(ctx, parsed.GitURL, parsed.Ref)
 	if err != nil {
 		return spec.LockEntry{}, "", false, err
 	}
@@ -268,16 +584,16 @@ func (s *Store) resolveGit(ctx context.Context, parsed *ParsedSource, locked *sp
 	if err != nil {
 		return spec.LockEntry{}, "", false, err
 	}
-	return entry, extracted, true, nil
+	return entry, extracted, pinned, nil
 }
 
-func (s *Store) resolveRef(ctx context.Context, repoURL, ref string) (string, error) {
+func (s *Store) resolveRefDetailed(ctx context.Context, repoURL, ref string) (string, bool, error) {
 	if ref != "" && hex40Re.MatchString(ref) {
-		return strings.ToLower(ref), nil
+		return strings.ToLower(ref), true, nil
 	}
 	out, err := s.Git.Run(ctx, "", "ls-remote", "--symref", repoURL)
 	if err != nil {
-		return "", fmt.Errorf("ls-remote %s: %w", repoURL, err)
+		return "", false, fmt.Errorf("ls-remote %s: %w", repoURL, err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	refs := make(map[string]string)
@@ -295,28 +611,31 @@ func (s *Store) resolveRef(ctx context.Context, repoURL, ref string) (string, er
 
 	if ref == "" {
 		if sha, ok := refs["HEAD"]; ok {
-			return sha, nil
+			return sha, false, nil
 		}
 		if headTarget != "" {
 			if sha, ok := refs[headTarget]; ok {
-				return sha, nil
+				return sha, false, nil
 			}
 		}
-		return "", spec.NewPolicyError("could not resolve default HEAD for %s", repoURL)
+		return "", false, spec.NewPolicyError("could not resolve default HEAD for %s", repoURL)
 	}
 
-	candidates := []string{
-		"refs/tags/" + ref + "^{}",
-		"refs/tags/" + ref,
-		"refs/heads/" + ref,
-		ref,
+	candidates := []struct {
+		name   string
+		pinned bool
+	}{
+		{name: "refs/tags/" + ref + "^{}", pinned: true},
+		{name: "refs/tags/" + ref, pinned: true},
+		{name: "refs/heads/" + ref, pinned: false},
+		{name: ref, pinned: strings.HasPrefix(ref, "refs/tags/")},
 	}
 	for _, c := range candidates {
-		if sha, ok := refs[c]; ok {
-			return sha, nil
+		if sha, ok := refs[c.name]; ok {
+			return sha, c.pinned, nil
 		}
 	}
-	return "", spec.NewPolicyError("ref %q not found in %s", ref, repoURL)
+	return "", false, spec.NewPolicyError("ref %q not found in %s", ref, repoURL)
 }
 
 func (s *Store) fetchAndExtract(ctx context.Context, parsed *ParsedSource, commitSHA string) (spec.LockEntry, string, error) {
