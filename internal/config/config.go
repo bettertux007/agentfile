@@ -91,7 +91,10 @@ func defaultUserConfigPath(ignoreCI bool) (path string, ok bool, err error) {
 			if errors.Is(statErr, os.ErrNotExist) {
 				return "", false, spec.NewPolicyError("user config file %s does not exist (AGENTFILE_CONFIG_FILE)", explicit)
 			}
-			return "", false, fmt.Errorf("stat user config %s: %w", explicit, statErr)
+			return "", false, &spec.PolicyError{
+				Message: fmt.Sprintf("cannot access user config file %s (AGENTFILE_CONFIG_FILE)", explicit),
+				Err:     statErr,
+			}
 		}
 		if info.IsDir() {
 			return "", false, spec.NewPolicyError("user config path %s is a directory (AGENTFILE_CONFIG_FILE)", explicit)
@@ -124,6 +127,12 @@ func loadLocalConfigFile(path string, required bool) (*LocalConfig, bool, error)
 				return nil, false, spec.NewPolicyError("config file %s does not exist", path)
 			}
 			return nil, false, nil
+		}
+		if required {
+			return nil, false, &spec.PolicyError{
+				Message: fmt.Sprintf("read config file %s", path),
+				Err:     err,
+			}
 		}
 		return nil, false, fmt.Errorf("read %s: %w", path, err)
 	}

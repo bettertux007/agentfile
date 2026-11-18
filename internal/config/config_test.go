@@ -595,6 +595,73 @@ func TestResolveOptionsExplicitAndIgnoreCI(t *testing.T) {
 	}
 }
 
+func TestExplicitUserConfigErrorsReturnPolicyError(t *testing.T) {
+	clearTestEnv(t)
+	proj := t.TempDir()
+	var pe *spec.PolicyError
+
+	// 1. UserConfigPath pointing to a directory fails closed with PolicyError (exit 2).
+	if _, err := ResolveWithOptions(proj, CLIOverrides{}, nil, ResolveOptions{UserConfigPath: t.TempDir()}); !errors.As(err, &pe) {
+		t.Fatalf("expected PolicyError when UserConfigPath is a directory, got %T: %v", err, err)
+	}
+
+	// 2. AGENTFILE_CONFIG_FILE whose parent is a regular file (ENOTDIR from os.Stat) returns PolicyError.
+	regularFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(regularFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTFILE_CONFIG_FILE", filepath.Join(regularFile, "config.yaml"))
+	if _, _, err := DefaultUserConfigPath(); !errors.As(err, &pe) {
+		t.Fatalf("expected PolicyError on ENOTDIR AGENTFILE_CONFIG_FILE, got %T: %v", err, err)
+	}
+	if _, err := ResolveWithOptions(proj, CLIOverrides{}, nil, ResolveOptions{}); !errors.As(err, &pe) {
+		t.Fatalf("expected PolicyError from ResolveWithOptions on ENOTDIR AGENTFILE_CONFIG_FILE, got %T: %v", err, err)
+	}
+
+	if os.Geteuid() == 0 {
+		t.Skip("skipping chmod 0000 permission tests when running as root")
+	}
+
+	// 3. Unreadable AGENTFILE_CONFIG_FILE (0000 permissions) returns PolicyError from ResolveWithOptions.
+	unreadable := filepath.Join(t.TempDir(), "unreadable.yaml")
+	if err := os.WriteFile(unreadable, []byte("version: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unreadable, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o644) })
+
+	t.Setenv("AGENTFILE_CONFIG_FILE", unreadable)
+	if _, err := ResolveWithOptions(proj, CLIOverrides{}, nil, ResolveOptions{}); !errors.As(err, &pe) {
+		t.Fatalf("expected PolicyError for unreadable AGENTFILE_CONFIG_FILE, got %T: %v", err, err)
+	}
+
+	// 4. Unreadable ResolveOptions.UserConfigPath (0000 permissions) returns PolicyError.
+	t.Setenv("AGENTFILE_CONFIG_FILE", "")
+	if _, err := ResolveWithOptions(proj, CLIOverrides{}, nil, ResolveOptions{UserConfigPath: unreadable}); !errors.As(err, &pe) {
+		t.Fatalf("expected PolicyError for unreadable UserConfigPath, got %T: %v", err, err)
+	}
+
+	// 5. AGENTFILE_CONFIG_FILE inside a 0000-permission parent directory (EACCES from os.Stat) returns PolicyError.
+	lockedDir := filepath.Join(t.TempDir(), "locked")
+	if err := os.MkdirAll(lockedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockedDir, "config.yaml"), []byte("version: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockedDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockedDir, 0o755) })
+
+	t.Setenv("AGENTFILE_CONFIG_FILE", filepath.Join(lockedDir, "config.yaml"))
+	if _, _, err := DefaultUserConfigPath(); !errors.As(err, &pe) {
+		t.Fatalf("expected PolicyError for EACCES stat on AGENTFILE_CONFIG_FILE, got %T: %v", err, err)
+	}
+}
+
 func containsSub(s, sub string) bool {
 	return len(sub) == 0 || (len(s) >= len(sub) && indexString(s, sub) >= 0)
 }
