@@ -315,6 +315,16 @@ func TestRedactSecretsAndPlaceholders(t *testing.T) {
 			want: `aws_key=[REDACTED]`,
 		},
 		{
+			name: "npm_ prefix",
+			in:   `npm_token=npm_1234567890abcdef`,
+			want: `npm_token=[REDACTED]`,
+		},
+		{
+			name: "npm_ standalone prefix",
+			in:   `token is npm_1234567890abcdef here`,
+			want: `token is [REDACTED] here`,
+		},
+		{
 			name: "preserve Claude/Gemini ${VAR}",
 			in:   `"Authorization": "Bearer ${GITHUB_PAT}"`,
 			want: `"Authorization": "Bearer ${GITHUB_PAT}"`,
@@ -435,6 +445,7 @@ func TestRedactUnifiedDiffDoubleDashAndPlusContentLines(t *testing.T) {
 func TestContainsLiteralSecret(t *testing.T) {
 	shouldDetect := []string{
 		"ghp_secret123456",
+		"npm_1234567890abcdef",
 		"Bearer rawtok",
 		"https://u:p@h",
 		`${TOKEN:-ghp_secret123456}`,

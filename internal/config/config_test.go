@@ -10,8 +10,8 @@ import (
 )
 
 func TestResolveDefaultsTTYvsNonTTY(t *testing.T) {
-	t.Setenv("CI", "")
-	t.Setenv("GITHUB_ACTIONS", "")
+	clearTestEnv(t)
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
 	dir := t.TempDir()
 
 	effTTY, err := Resolve(dir, CLIOverrides{}, func() bool { return true })
@@ -57,12 +57,12 @@ git_exclude: false
 		t.Fatal(err)
 	}
 
-	eff, err := Resolve(dir, CLIOverrides{
+	eff, err := ResolveWithOptions(dir, CLIOverrides{
 		Copy:          true,
 		Force:         true,
 		GitExclude:    true,
 		GitExcludeSet: true,
-	}, func() bool { return false })
+	}, func() bool { return false }, ResolveOptions{DisableUserConfig: true})
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -75,13 +75,13 @@ func TestResolveRejectsConflictsAndUnknownFields(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	_, err := Resolve(dir, CLIOverrides{Copy: true, LinkMode: "symlink"}, nil)
+	_, err := ResolveWithOptions(dir, CLIOverrides{Copy: true, LinkMode: "symlink"}, nil, ResolveOptions{DisableUserConfig: true})
 	var pe *spec.PolicyError
 	if !errors.As(err, &pe) {
 		t.Fatalf("expected PolicyError for --copy + --link-mode=symlink, got %v", err)
 	}
 
-	_, err = Resolve(dir, CLIOverrides{Force: true, OnConflict: "fail"}, nil)
+	_, err = ResolveWithOptions(dir, CLIOverrides{Force: true, OnConflict: "fail"}, nil, ResolveOptions{DisableUserConfig: true})
 	if !errors.As(err, &pe) {
 		t.Fatalf("expected PolicyError for --force + --on-conflict=fail, got %v", err)
 	}
@@ -93,7 +93,7 @@ func TestResolveRejectsConflictsAndUnknownFields(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("version: 1\nbogus: 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err = Resolve(dir, CLIOverrides{}, nil)
+	_, err = ResolveWithOptions(dir, CLIOverrides{}, nil, ResolveOptions{DisableUserConfig: true})
 	if !errors.As(err, &pe) {
 		t.Fatalf("expected PolicyError on unknown config field, got %v", err)
 	}
@@ -108,7 +108,7 @@ func TestResolveRejectsConflictsAndUnknownFields(t *testing.T) {
 	}
 	for _, bc := range badConfigs {
 		_ = os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(bc), 0o644)
-		if _, err := Resolve(dir, CLIOverrides{}, nil); !errors.As(err, &pe) {
+		if _, err := ResolveWithOptions(dir, CLIOverrides{}, nil, ResolveOptions{DisableUserConfig: true}); !errors.As(err, &pe) {
 			t.Fatalf("expected PolicyError for config %q, got %v", bc, err)
 		}
 	}
@@ -299,6 +299,14 @@ func TestResolveFourLayerPrecedence(t *testing.T) {
 	}
 	if len(effA.Warnings) != 1 {
 		t.Fatalf("expected 1 overwrite warning from user_config, got %v", effA.Warnings)
+	}
+	// Resolve delegates cleanly to ResolveWithOptions with default options.
+	effADelegated, err := Resolve(projA, CLIOverrides{}, func() bool { return true })
+	if err != nil {
+		t.Fatalf("Resolve projA failed: %v", err)
+	}
+	if effADelegated.LinkMode != effA.LinkMode || effADelegated.OnConflict != effA.OnConflict || effADelegated.UserConfigPath != effA.UserConfigPath {
+		t.Fatalf("Resolve delegation mismatch: got %+v vs %+v", effADelegated, effA)
 	}
 
 	// B. local_config overrides user_config; no overwrite warning when local_config overrides on_conflict.

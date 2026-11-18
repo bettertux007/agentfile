@@ -151,53 +151,8 @@ func newDiffCmd(ec *execContext) *cobra.Command {
 				return allOps[i].RelPath < allOps[j].RelPath
 			})
 
-			var (
-				diffOut   strings.Builder
-				truncated bool
-				fileStats []diffFileStat
-				hasDiff   bool
-				totalAdds int
-				totalDels int
-			)
-
-			appendRendered := func(chunk string, fallbackPath string, parseTree bool) {
-				if chunk == "" {
-					return
-				}
-				hasDiff = true
-				redacted := diff.RedactUnifiedDiff(chunk)
-
-				if parseTree {
-					parsed := parseUnifiedDiffStats(redacted, fallbackPath)
-					for _, fs := range parsed {
-						fileStats = append(fileStats, fs)
-						totalAdds += fs.additions
-						totalDels += fs.deletions
-					}
-				} else {
-					adds, dels := countUnifiedChunkLines(redacted)
-					fileStats = append(fileStats, diffFileStat{
-						relPath:   fallbackPath,
-						additions: adds,
-						deletions: dels,
-					})
-					totalAdds += adds
-					totalDels += dels
-				}
-
-				if truncated {
-					return
-				}
-				if diffOut.Len()+len(redacted) > diff.MaxTotalDiffBytes {
-					truncated = true
-					fmt.Fprintf(&diffOut, "... diff truncated (exceeded %d MiB total diff limit)\n", diff.MaxTotalDiffBytes/(1<<20))
-					return
-				}
-				diffOut.WriteString(redacted)
-				if !strings.HasSuffix(redacted, "\n") {
-					diffOut.WriteByte('\n')
-				}
-			}
+			var dr diffRenderer
+			appendRendered := dr.appendRendered
 
 			for _, op := range allOps {
 				switch op.Type {
@@ -280,23 +235,23 @@ func newDiffCmd(ec *execContext) *cobra.Command {
 
 			switch {
 			case nameOnly:
-				seen := make(map[string]bool, len(fileStats))
-				for _, fs := range fileStats {
+				seen := make(map[string]bool, len(dr.fileStats))
+				for _, fs := range dr.fileStats {
 					if !seen[fs.relPath] {
 						seen[fs.relPath] = true
 						fmt.Fprintln(ec.out, fs.relPath)
 					}
 				}
 			case stat:
-				printDiffStat(ec.out, fileStats, totalAdds, totalDels)
+				printDiffStat(ec.out, dr.fileStats, dr.totalAdds, dr.totalDels)
 			default:
-				if diffOut.Len() > 0 {
-					fmt.Fprint(ec.out, diffOut.String())
+				if dr.diffOut.Len() > 0 {
+					fmt.Fprint(ec.out, dr.diffOut.String())
 				}
 			}
 
 			if check {
-				if hasDiff || len(plan.Actions) > 0 || len(plan.PruneOps) > 0 {
+				if dr.hasDiff || len(plan.Actions) > 0 || len(plan.PruneOps) > 0 {
 					return spec.NewPolicyError("workspace has pending diff (run 'agentfile sync')")
 				}
 				if lockStatus == "missing" || lockStatus == "out_of_sync" || lockStatus == "invalid" {
@@ -319,6 +274,85 @@ func newDiffCmd(ec *execContext) *cobra.Command {
 	cmd.Flags().BoolVar(&check, "check", false, "Exit 2 if diff is non-empty, lockfile is out of sync, or conflicts/journal exist")
 	cmd.Flags().BoolVar(&fetch, "fetch", false, "Hydrate cold remote dependencies in cache without writing Agentfile.lock")
 	return cmd
+}
+
+type diffRenderer struct {
+	diffOut   strings.Builder
+	truncated bool
+	fileStats []diffFileStat
+	hasDiff   bool
+	totalAdds int
+	totalDels int
+	maxBytes  int
+}
+
+func (r *diffRenderer) maxTotalBytes() int {
+	if r.maxBytes > 0 {
+		return r.maxBytes
+	}
+	return diff.MaxTotalDiffBytes
+}
+
+func (r *diffRenderer) appendRendered(chunk string, fallbackPath string, parseTree bool) {
+	if chunk == "" {
+		return
+	}
+	r.hasDiff = true
+	redacted := diff.RedactUnifiedDiff(chunk)
+
+	if parseTree {
+		parsed := parseUnifiedDiffStats(redacted, fallbackPath)
+		for _, fs := range parsed {
+			r.fileStats = append(r.fileStats, fs)
+			r.totalAdds += fs.additions
+			r.totalDels += fs.deletions
+		}
+	} else {
+		adds, dels := countUnifiedChunkLines(redacted)
+		r.fileStats = append(r.fileStats, diffFileStat{
+			relPath:   fallbackPath,
+			additions: adds,
+			deletions: dels,
+		})
+		r.totalAdds += adds
+		r.totalDels += dels
+	}
+
+	if r.truncated {
+		return
+	}
+	maxBytes := r.maxTotalBytes()
+	truncNotice := fmt.Sprintf("... diff truncated (exceeded %d MiB total diff limit)\n", diff.MaxTotalDiffBytes/(1<<20))
+	if r.diffOut.Len()+len(redacted) > maxBytes {
+		r.truncated = true
+		if r.diffOut.Len() == 0 {
+			if strings.HasSuffix(redacted, truncNotice) {
+				r.diffOut.WriteString(redacted)
+				return
+			}
+			limit := maxBytes
+			if limit > len(redacted) {
+				limit = len(redacted)
+			}
+			prefix := redacted[:limit]
+			if nl := strings.LastIndexByte(prefix, '\n'); nl >= 0 {
+				prefix = prefix[:nl+1]
+			}
+			r.diffOut.WriteString(prefix)
+			if prefix != "" && !strings.HasSuffix(prefix, "\n") {
+				r.diffOut.WriteByte('\n')
+			}
+		}
+		r.diffOut.WriteString(truncNotice)
+		return
+	}
+	r.diffOut.WriteString(redacted)
+	if !strings.HasSuffix(redacted, "\n") {
+		r.diffOut.WriteByte('\n')
+	}
+	if strings.HasSuffix(redacted, truncNotice) {
+		r.truncated = true
+	}
 }
 
 func formatOversizedFileDiff(projectRoot, relPath string, deleting bool, newSize int) string {

@@ -21,7 +21,7 @@ var (
 	rePEMPrivateKey = regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----`)
 	reAuthScheme    = regexp.MustCompile(`(?i)\b(Bearer|Basic)([ \t]+)(\[REDACTED\]|[^\s"',;}\]]+)`)
 	reURLUserInfo   = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)([^:@/\s"'<>]+):(\[REDACTED\]|[^@/\s"'<>]+)@`)
-	reKnownPrefixes = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_-]{6,}|github_pat_[A-Za-z0-9_]{6,}|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{6,}|A(?:KIA|SIA)[0-9A-Z]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[0-9A-Za-z_-]{20,}|(?:npm|pypi|glpat)-[A-Za-z0-9_-]{8,})`)
+	reKnownPrefixes = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_-]{6,}|github_pat_[A-Za-z0-9_]{6,}|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{6,}|A(?:KIA|SIA)[0-9A-Z]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[0-9A-Za-z_-]{20,}|(?:pypi|glpat)-[A-Za-z0-9_-]{8,}|npm_[A-Za-z0-9_-]{8,})`)
 
 	reQuotedKV = regexp.MustCompile(
 		`(?i)(["'])(` + secretKeyPattern + `)(["']\s*:\s*)(?:"((?:\\.|[^"\\\n])*)"|'((?:\\.|[^'\\\n])*)')`,

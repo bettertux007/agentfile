@@ -1574,6 +1574,10 @@ skills:
 		{"add", "mcp", "bad5", "--env", "TOKEN=ghp_1234567890abcdef", "--", "npx", "mcp"},
 		{"add", "mcp", "bad6", "--url", "https://api.example.com/mcp", "--header", "Authorization: Bearer rawtok"},
 		{"add", "mcp", "bad7", "--url", "https://u:pass@host/mcp"},
+		{"add", "mcp", "bad8", "--env-ref", "FOO:-ghp_1234567890abcdef", "--", "npx", "mcp"},
+		{"add", "mcp", "bad9", "--env-ref", "FOO}bar", "--", "npx", "mcp"},
+		{"add", "mcp", "bad10", "--url", "https://api.example.com/mcp", "--header-env", "TOKEN:-ghp_1234567890abcdef:Authorization"},
+		{"add", "mcp", "bad11", "--url", "https://api.example.com/mcp", "--header-env", "FOO}bar:Authorization"},
 	}
 	for _, args := range badMCPCalls {
 		out.Reset()
@@ -1971,4 +1975,106 @@ func TestAddRemoveDriftAndRollbackSafety(t *testing.T) {
 	if string(afterDriftRemove) != driftedManifest {
 		t.Fatalf("expected Agentfile.yaml untouched when remove failed due to unrelated lock drift")
 	}
+}
+
+func TestDiffRendererSingleChunkTruncation(t *testing.T) {
+	t.Parallel()
+	const truncNotice = "... diff truncated (exceeded 10 MiB total diff limit)\n"
+	const testLimit = 1024
+
+	if def := (&diffRenderer{}).maxTotalBytes(); def != diff.MaxTotalDiffBytes {
+		t.Fatalf("expected default maxTotalBytes=%d, got %d", diff.MaxTotalDiffBytes, def)
+	}
+
+	t.Run("preserves single DiffTrees chunk slightly over limit", func(t *testing.T) {
+		r := diffRenderer{maxBytes: testLimit}
+		header := "--- /dev/null\n+++ b/.claude/skills/big/SKILL.md\n@@ -0,0 +1,16 @@\n"
+		line := "+" + strings.Repeat("a", 62) + "\n" // 64 bytes
+		var b strings.Builder
+		b.WriteString(header)
+		for b.Len()+len(line) <= testLimit-10 {
+			b.WriteString(line)
+		}
+		if rem := (testLimit - 10) - b.Len(); rem > 2 {
+			b.WriteString("+" + strings.Repeat("a", rem-2) + "\n")
+		}
+		b.WriteString(truncNotice)
+		chunk := b.String()
+		if len(chunk) <= testLimit {
+			t.Fatalf("test setup expected chunk > testLimit (%d), got %d", testLimit, len(chunk))
+		}
+
+		r.appendRendered(chunk, ".claude/skills/big", true)
+		r.appendRendered("--- /dev/null\n+++ b/extra.txt\n@@ -0,0 +1,1 @@\n+extra\n", "extra.txt", false)
+
+		got := r.diffOut.String()
+		if !r.hasDiff || !r.truncated {
+			t.Fatalf("expected hasDiff=true and truncated=true, got hasDiff=%v truncated=%v", r.hasDiff, r.truncated)
+		}
+		if !strings.Contains(got, "--- /dev/null\n+++ b/.claude/skills/big/SKILL.md\n") {
+			t.Fatalf("expected single DiffTrees hunks preserved, got len=%d", len(got))
+		}
+		if strings.Count(got, truncNotice) != 1 {
+			t.Fatalf("expected exactly 1 truncation notice, got %d", strings.Count(got, truncNotice))
+		}
+		if strings.Contains(got, "extra.txt") {
+			t.Fatalf("expected subsequent chunk suppressed after truncation")
+		}
+		if len(r.fileStats) != 2 {
+			t.Fatalf("expected stats to still record all changed files (2), got %d", len(r.fileStats))
+		}
+	})
+
+	t.Run("caps raw single chunk exceeding limit", func(t *testing.T) {
+		r := diffRenderer{maxBytes: testLimit}
+		header := "--- /dev/null\n+++ b/raw.txt\n@@ -0,0 +1,20 @@\n"
+		line := "+" + strings.Repeat("b", 62) + "\n"
+		var b strings.Builder
+		b.WriteString(header)
+		for b.Len() <= testLimit+256 {
+			b.WriteString(line)
+		}
+
+		r.appendRendered(b.String(), "raw.txt", false)
+		r.appendRendered("--- /dev/null\n+++ b/later.txt\n@@ -0,0 +1,1 @@\n+later\n", "later.txt", false)
+
+		got := r.diffOut.String()
+		if !r.truncated {
+			t.Fatalf("expected truncated=true")
+		}
+		if !strings.HasSuffix(got, truncNotice) || strings.Count(got, truncNotice) != 1 {
+			t.Fatalf("expected single truncation notice suffix, got count=%d", strings.Count(got, truncNotice))
+		}
+		if len(got) > testLimit+len(truncNotice) {
+			t.Fatalf("expected capped output <= testLimit+notice, got %d", len(got))
+		}
+		if !strings.Contains(got, "+++ b/raw.txt") || strings.Contains(got, "later.txt") {
+			t.Fatalf("unexpected rendered diff bounds")
+		}
+	})
+
+	t.Run("truncates on subsequent chunk exceeding limit", func(t *testing.T) {
+		r := diffRenderer{maxBytes: testLimit}
+		first := "--- /dev/null\n+++ b/first.txt\n@@ -0,0 +1,1 @@\n+hello\n"
+		r.appendRendered(first, "first.txt", false)
+
+		line := "+" + strings.Repeat("c", 62) + "\n"
+		var b strings.Builder
+		b.WriteString("--- /dev/null\n+++ b/second.txt\n@@ -0,0 +1,20 @@\n")
+		for b.Len() <= testLimit {
+			b.WriteString(line)
+		}
+		r.appendRendered(b.String(), "second.txt", false)
+
+		got := r.diffOut.String()
+		if !r.truncated {
+			t.Fatalf("expected truncated=true on second chunk")
+		}
+		if !strings.Contains(got, "+++ b/first.txt") || strings.Contains(got, "+++ b/second.txt") {
+			t.Fatalf("expected first chunk kept and second chunk excluded")
+		}
+		if strings.Count(got, truncNotice) != 1 {
+			t.Fatalf("expected 1 truncation notice, got %d", strings.Count(got, truncNotice))
+		}
+	})
 }

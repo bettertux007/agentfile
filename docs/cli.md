@@ -126,7 +126,7 @@ agentfile remove <skill|agent|rule|mcp> <name> [flags]
 
 ## `agentfile upgrade`
 
-Re-resolves remote Git dependencies (all remote dependencies by default, or a single dependency specified as `<kind>:<name>` or `<kind> <name>`), updates `Agentfile.lock`, syncs workspace configurations, and prints per-dependency lockfile deltas (`added`, `updated`, `removed`, `unchanged`). Dependencies pinned to an explicit commit SHA remain unchanged (`pinned: true`).
+Re-resolves remote Git dependencies (all remote dependencies by default, or a single dependency specified as `<kind>:<name>` or `<kind> <name>`), updates `Agentfile.lock`, syncs workspace configurations, and prints per-dependency lockfile deltas (`added`, `updated`, `removed`, `unchanged`). Dependencies pinned to a Git tag (`refs/tags/...`) or an explicit 40-character commit SHA remain unchanged (`pinned: true`).
 
 ```sh
 agentfile upgrade [<kind>:<name> | <kind> <name>] [flags]
@@ -149,7 +149,7 @@ Validates `Agentfile.yaml` against the embedded JSON Schema v1 (`schemas/v1/agen
 agentfile doctor [--json]
 ```
 
-* `--json`: Output a structured JSON report (`DoctorReport`).
+* `--json`: Output a structured JSON report (`DoctorReport`, including `effective_config.user_config_path` when active and per-field `effective_config.sources` provenance).
 
 ---
 

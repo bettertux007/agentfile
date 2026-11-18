@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/bettertux007/agentfile/internal/diff"
@@ -14,6 +15,11 @@ import (
 	"github.com/bettertux007/agentfile/internal/store"
 	"github.com/bettertux007/agentfile/schemas"
 	"github.com/spf13/cobra"
+)
+
+var (
+	validEnvVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	validHeaderNameRe = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
 )
 
 func newAddCmd(ec *execContext) *cobra.Command {
@@ -325,6 +331,9 @@ func parseMCPEnvFlags(envFlags, envRefFlags []string) (map[string]string, error)
 		if varName == "" {
 			return nil, spec.NewPolicyError("invalid --env-ref: variable name cannot be empty")
 		}
+		if !validEnvVarNameRe.MatchString(varName) {
+			return nil, spec.NewPolicyError("invalid --env-ref %q: variable name must match ^[A-Za-z_][A-Za-z0-9_]*$", raw)
+		}
 		ph := "${" + varName + "}"
 		if _, err := spec.ParseEnvString(ph); err != nil {
 			return nil, spec.NewPolicyError("invalid --env-ref %q: %v", raw, err)
@@ -379,14 +388,20 @@ func parseMCPHeaderFlags(headerFlags, headerEnvFlags []string) (map[string]strin
 	}
 
 	for _, raw := range headerEnvFlags {
-		varPart, hdrPart, ok := strings.Cut(raw, ":")
-		if !ok {
+		idx := strings.LastIndex(raw, ":")
+		if idx < 0 {
 			return nil, spec.NewPolicyError("invalid --header-env %q (expected VAR:HEADER)", raw)
 		}
-		varName := strings.TrimSpace(varPart)
-		hdrName := strings.TrimSpace(hdrPart)
+		varName := strings.TrimSpace(raw[:idx])
+		hdrName := strings.TrimSpace(raw[idx+1:])
 		if varName == "" || hdrName == "" {
 			return nil, spec.NewPolicyError("invalid --header-env %q (expected VAR:HEADER)", raw)
+		}
+		if !validEnvVarNameRe.MatchString(varName) {
+			return nil, spec.NewPolicyError("invalid --header-env %q: variable name must match ^[A-Za-z_][A-Za-z0-9_]*$", raw)
+		}
+		if !validHeaderNameRe.MatchString(hdrName) {
+			return nil, spec.NewPolicyError("invalid --header-env %q: invalid HTTP header name %q", raw, hdrName)
 		}
 		ph := "${" + varName + "}"
 		if _, err := spec.ParseEnvString(ph); err != nil {
