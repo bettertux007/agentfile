@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -609,5 +610,494 @@ func TestPlanManagedBlockPrunePartialCleanAndConflictPolicies(t *testing.T) {
 	}
 	if _, _, err := resolveConflictChoice("a", "r", "bogus", nil); err == nil {
 		t.Fatalf("expected error on unknown conflict policy")
+	}
+}
+
+type panicPrompter struct{}
+
+func (panicPrompter) AskConflict(relPath, reason string) (ConflictChoice, error) {
+	panic("Prompter must not be called when InspectConflicts is true: " + relPath + " (" + reason + ")")
+}
+
+func TestBuildPlanInspectConflicts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgAsk := &config.EffectiveConfig{LinkMode: "copy", OnConflict: "ask", GitExclude: false}
+
+	// First sync an owned file that will be pruned on the inspect pass so we test ActionDeletePath OldContent too.
+	initPlan, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"claude"},
+		Config:        &config.EffectiveConfig{LinkMode: "copy", OnConflict: "overwrite", GitExclude: false},
+		CompiledResults: []*adapters.CompileResult{{
+			Target: "claude",
+			Files: []adapters.ArtifactOp{
+				{Target: "claude", RelPath: ".claude/rules/agentfile-old.md", Kind: adapters.OpWriteDropIn, Content: []byte("old-owned-body\n")},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("init BuildPlan failed: %v", err)
+	}
+	if err := Commit(initPlan); err != nil {
+		t.Fatalf("init Commit failed: %v", err)
+	}
+
+	// Create unmanaged .claude/rules/agentfile-r.md and pre-existing .mcp.json with 2 conflicting entries.
+	_ = os.MkdirAll(filepath.Join(dir, ".claude", "rules"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, ".claude", "rules", "agentfile-r.md"), []byte("handwritten-rule\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(`{"mcpServers":{"gh":{"url":"https://old-gh"},"db":{"url":"https://old-db"}}}`), 0o644)
+
+	// Create an oversized (> 1 MiB) unmanaged file to ensure OldContent stays nil while OldKind == "file".
+	bigBytes := make([]byte, maxOldContentBytes+1)
+	for i := range bigBytes {
+		bigBytes[i] = 'a'
+	}
+	_ = os.WriteFile(filepath.Join(dir, ".claude", "rules", "agentfile-big.md"), bigBytes, 0o644)
+
+	compiled := []*adapters.CompileResult{{
+		Target: "claude",
+		Files: []adapters.ArtifactOp{
+			{
+				Target:  "claude",
+				RelPath: ".mcp.json",
+				Kind:    adapters.OpMergeJSONC,
+				JSONMerge: &adapters.JSONMergeSpec{
+					MapEntries: map[string]any{
+						"/mcpServers/gh": map[string]any{"url": "https://new-gh"},
+						"/mcpServers/db": map[string]any{"url": "https://new-db"},
+					},
+				},
+			},
+			{Target: "claude", RelPath: ".claude/rules/agentfile-r.md", Kind: adapters.OpWriteDropIn, Content: []byte("managed-rule\n")},
+			{Target: "claude", RelPath: ".claude/rules/agentfile-big.md", Kind: adapters.OpWriteDropIn, Content: []byte("small-new\n")},
+		},
+	}}
+
+	for _, policy := range []string{"ask", "fail"} {
+		cfg := &config.EffectiveConfig{LinkMode: "copy", OnConflict: policy, GitExclude: false}
+		plan, err := BuildPlan(PlanInput{
+			ProjectRoot:      dir,
+			ActiveTargets:    []string{"claude"},
+			Config:           cfg,
+			CompiledResults:  compiled,
+			Prompter:         panicPrompter{},
+			InspectConflicts: true,
+		})
+		if err != nil {
+			t.Fatalf("BuildPlan InspectConflicts with policy=%s failed: %v", policy, err)
+		}
+		if len(plan.Conflicts) != 3 {
+			t.Fatalf("policy=%s: expected 3 deduplicated conflicts (.mcp.json, agentfile-r.md, agentfile-big.md), got %+v", policy, plan.Conflicts)
+		}
+		if len(plan.Summary.Conflicts) != len(plan.Conflicts) {
+			t.Fatalf("policy=%s: Summary.Conflicts mismatch: %+v vs %+v", policy, plan.Summary.Conflicts, plan.Conflicts)
+		}
+
+		// Verify deduplication by RelPath.
+		seen := map[string]bool{}
+		for _, c := range plan.Conflicts {
+			if c.Target != "claude" || c.Reason == "" {
+				t.Fatalf("invalid conflict entry: %+v", c)
+			}
+			if seen[c.RelPath] {
+				t.Fatalf("duplicate conflict for %s", c.RelPath)
+			}
+			seen[c.RelPath] = true
+		}
+		if !seen[".mcp.json"] || !seen[".claude/rules/agentfile-r.md"] || !seen[".claude/rules/agentfile-big.md"] {
+			t.Fatalf("missing expected conflict paths: %+v", seen)
+		}
+
+		// Verify OldContent captured on ActionWriteFile and ActionDeletePath, and omitted when > 1 MiB.
+		byPath := map[string]PlannedAction{}
+		for _, a := range plan.Actions {
+			byPath[a.RelPath] = a
+		}
+		if act, ok := byPath[".claude/rules/agentfile-r.md"]; !ok || act.Type != ActionWriteFile || string(act.OldContent) != "handwritten-rule\n" || act.OldKind != "file" {
+			t.Fatalf("unexpected ActionWriteFile for agentfile-r.md: %+v", act)
+		}
+		if act, ok := byPath[".mcp.json"]; !ok || act.Type != ActionWriteFile || len(act.OldContent) == 0 || act.OldKind != "file" {
+			t.Fatalf("unexpected ActionWriteFile for .mcp.json: %+v", act)
+		}
+		if act, ok := byPath[".claude/rules/agentfile-big.md"]; !ok || act.Type != ActionWriteFile || act.OldContent != nil || act.OldKind != "file" {
+			t.Fatalf("expected nil OldContent for >1 MiB file, got len=%d kind=%q", len(act.OldContent), act.OldKind)
+		}
+
+		if len(plan.PruneOps) != 1 {
+			t.Fatalf("expected 1 prune op for agentfile-old.md, got %d", len(plan.PruneOps))
+		}
+		delOp := plan.PruneOps[0]
+		if delOp.Type != ActionDeletePath || delOp.RelPath != ".claude/rules/agentfile-old.md" || string(delOp.OldContent) != "old-owned-body\n" || delOp.OldKind != "file" {
+			t.Fatalf("unexpected prune ActionDeletePath: %+v", delOp)
+		}
+	}
+
+	// With OnConflict: "overwrite", plan.Conflicts remains empty even with InspectConflicts: true.
+	_ = cfgAsk
+	planOW, err := BuildPlan(PlanInput{
+		ProjectRoot:      dir,
+		ActiveTargets:    []string{"claude"},
+		Config:           &config.EffectiveConfig{LinkMode: "copy", OnConflict: "overwrite", GitExclude: false},
+		CompiledResults:  compiled,
+		InspectConflicts: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan overwrite failed: %v", err)
+	}
+	if len(planOW.Conflicts) != 0 || len(planOW.Summary.Conflicts) != 0 {
+		t.Fatalf("expected empty Conflicts with OnConflict=overwrite, got %+v", planOW.Conflicts)
+	}
+}
+
+func TestBuildPlanOldKindAndLinkTransitions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	srcSkill := filepath.Join(dir, "src-skill")
+	_ = os.MkdirAll(srcSkill, 0o755)
+	_ = os.WriteFile(filepath.Join(srcSkill, "SKILL.md"), []byte("# Skill\n"), 0o644)
+
+	// 1. Existing directory -> ActionSymlink captures OldKind: "dir".
+	sk1Dir := filepath.Join(dir, ".claude", "skills", "sk1")
+	_ = os.MkdirAll(sk1Dir, 0o755)
+	_ = os.WriteFile(filepath.Join(sk1Dir, "old.txt"), []byte("old"), 0o644)
+
+	planSym, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"claude"},
+		Config:        &config.EffectiveConfig{LinkMode: "symlink", OnConflict: "overwrite"},
+		CompiledResults: []*adapters.CompileResult{{
+			Target: "claude",
+			Files: []adapters.ArtifactOp{
+				{Target: "claude", RelPath: ".claude/skills/sk1", Kind: adapters.OpMaterializeTree, SourcePath: srcSkill},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan dir->symlink failed: %v", err)
+	}
+	if len(planSym.Actions) != 1 || planSym.Actions[0].Type != ActionSymlink || planSym.Actions[0].OldKind != "dir" || planSym.Actions[0].OldLinkTarget != "" {
+		t.Fatalf("expected ActionSymlink with OldKind=dir, got %+v", planSym.Actions)
+	}
+
+	// Commit so sk1 becomes an owned symlink, then test symlink -> ActionCopyTree and symlink -> ActionDeletePath.
+	if err := Commit(planSym); err != nil {
+		t.Fatalf("Commit symlink failed: %v", err)
+	}
+
+	// 2. Existing symlink -> ActionCopyTree captures OldKind: "symlink" and OldLinkTarget.
+	planCopy, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"claude"},
+		Config:        &config.EffectiveConfig{LinkMode: "copy", OnConflict: "overwrite"},
+		CompiledResults: []*adapters.CompileResult{{
+			Target: "claude",
+			Files: []adapters.ArtifactOp{
+				{Target: "claude", RelPath: ".claude/skills/sk1", Kind: adapters.OpMaterializeTree, SourcePath: srcSkill},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan symlink->copy failed: %v", err)
+	}
+	if len(planCopy.Actions) != 1 || planCopy.Actions[0].Type != ActionCopyTree || planCopy.Actions[0].OldKind != "symlink" || planCopy.Actions[0].OldLinkTarget != srcSkill {
+		t.Fatalf("expected ActionCopyTree with OldKind=symlink OldLinkTarget=%q, got %+v", srcSkill, planCopy.Actions)
+	}
+
+	// 3. Existing symlink -> ActionDeletePath (when pruned) captures OldKind: "symlink" and OldLinkTarget.
+	planPruneSym, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"claude"},
+		Config:          &config.EffectiveConfig{LinkMode: "symlink", OnConflict: "overwrite"},
+		CompiledResults: []*adapters.CompileResult{{Target: "claude", Files: nil}},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan prune symlink failed: %v", err)
+	}
+	if len(planPruneSym.PruneOps) != 1 || planPruneSym.PruneOps[0].Type != ActionDeletePath || planPruneSym.PruneOps[0].OldKind != "symlink" || planPruneSym.PruneOps[0].OldLinkTarget != srcSkill {
+		t.Fatalf("expected ActionDeletePath with OldKind=symlink OldLinkTarget=%q, got %+v", srcSkill, planPruneSym.PruneOps)
+	}
+}
+
+func TestCheckWorkspaceDrift(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail", GitExclude: false}
+	res := []*adapters.CompileResult{{
+		Target: "claude",
+		Files: []adapters.ArtifactOp{
+			{Target: "claude", RelPath: ".claude/rules/r1.md", Kind: adapters.OpWriteDropIn, Content: []byte("v1\n")},
+		},
+	}}
+
+	// 1. Before initial sync: Actions > 0 and missing state.json -> drifted.
+	planInit, err := BuildPlan(PlanInput{ProjectRoot: dir, ActiveTargets: []string{"claude"}, Config: cfg, CompiledResults: res})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted, reason := CheckWorkspaceDrift(dir, planInit); !drifted || reason == "" {
+		t.Fatalf("expected drift before initial sync, got drifted=%v reason=%q", drifted, reason)
+	}
+	if err := Commit(planInit); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Clean workspace -> no drift.
+	planClean, err := BuildPlan(PlanInput{ProjectRoot: dir, ActiveTargets: []string{"claude"}, Config: cfg, CompiledResults: res})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted, reason := CheckWorkspaceDrift(dir, planClean); drifted || reason != "" {
+		t.Fatalf("expected no drift on clean workspace, got drifted=%v reason=%q", drifted, reason)
+	}
+
+	// 3. Actions > 0 (content modified in manifest) -> drifted.
+	planMod, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"claude"},
+		Config:        cfg,
+		CompiledResults: []*adapters.CompileResult{{
+			Target: "claude",
+			Files: []adapters.ArtifactOp{
+				{Target: "claude", RelPath: ".claude/rules/r1.md", Kind: adapters.OpWriteDropIn, Content: []byte("v2\n")},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted, reason := CheckWorkspaceDrift(dir, planMod); !drifted || reason == "" {
+		t.Fatalf("expected drift on Actions > 0, got drifted=%v reason=%q", drifted, reason)
+	}
+
+	// 4. PruneOps > 0 -> drifted.
+	planPrune, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"claude"},
+		Config:          cfg,
+		CompiledResults: []*adapters.CompileResult{{Target: "claude", Files: nil}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted, reason := CheckWorkspaceDrift(dir, planPrune); !drifted || reason == "" {
+		t.Fatalf("expected drift on PruneOps > 0, got drifted=%v reason=%q", drifted, reason)
+	}
+
+	// 5. Conflicts > 0 -> drifted (even if we construct a conflict-only plan or via InspectConflicts).
+	_ = os.WriteFile(filepath.Join(dir, ".claude", "rules", "r2.md"), []byte("unmanaged"), 0o644)
+	planConflict, err := BuildPlan(PlanInput{
+		ProjectRoot:      dir,
+		ActiveTargets:    []string{"claude"},
+		Config:           cfg,
+		InspectConflicts: true,
+		CompiledResults: []*adapters.CompileResult{{
+			Target: "claude",
+			Files: []adapters.ArtifactOp{
+				{Target: "claude", RelPath: ".claude/rules/r1.md", Kind: adapters.OpWriteDropIn, Content: []byte("v1\n")},
+				{Target: "claude", RelPath: ".claude/rules/r2.md", Kind: adapters.OpWriteDropIn, Content: []byte("managed\n")},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted, reason := CheckWorkspaceDrift(dir, planConflict); !drifted || reason == "" {
+		t.Fatalf("expected drift on Conflicts > 0, got drifted=%v reason=%q", drifted, reason)
+	}
+	_ = os.Remove(filepath.Join(dir, ".claude", "rules", "r2.md"))
+
+	// 6. Pending commit-journal.json -> drifted.
+	_ = writeFileAtomic(JournalPath(dir), []byte(`{"backup_dir":".agentfile/backups/old"}`), 0o644)
+	if drifted, reason := CheckWorkspaceDrift(dir, planClean); !drifted || reason == "" {
+		t.Fatalf("expected drift on pending commit-journal.json, got drifted=%v reason=%q", drifted, reason)
+	}
+	_ = os.Remove(JournalPath(dir))
+
+	// 7. ExcludeFingerprint mismatch -> drifted.
+	cfgGitExclude := &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail", GitExclude: true}
+	planExcl, err := BuildPlan(PlanInput{ProjectRoot: dir, ActiveTargets: []string{"claude"}, Config: cfgGitExclude, CompiledResults: res})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted, reason := CheckWorkspaceDrift(dir, planExcl); !drifted || reason == "" {
+		t.Fatalf("expected drift on ExcludeFingerprint mismatch, got drifted=%v reason=%q", drifted, reason)
+	}
+
+	// 8. Missing .agentfile/state.json -> drifted.
+	_ = os.Remove(StatePath(dir))
+	if drifted, reason := CheckWorkspaceDrift(dir, planClean); !drifted || reason == "" {
+		t.Fatalf("expected drift on missing state.json, got drifted=%v reason=%q", drifted, reason)
+	}
+}
+
+func TestCommitSidecarWritesAndRollback(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	yamlPath := filepath.Join(dir, "Agentfile.yaml")
+	lockPath := filepath.Join(dir, "Agentfile.lock")
+	rulePath := filepath.Join(dir, ".claude", "rules", "r1.md")
+	_ = os.MkdirAll(filepath.Dir(rulePath), 0o755)
+	_ = os.WriteFile(yamlPath, []byte("version: 1\n# orig yaml\n"), 0o644)
+	_ = os.WriteFile(lockPath, []byte("version: 1\n# orig lock\n"), 0o644)
+	_ = os.WriteFile(rulePath, []byte("orig rule\n"), 0o644)
+
+	cfg := &config.EffectiveConfig{LinkMode: "copy", OnConflict: "overwrite", GitExclude: false}
+	plan, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"claude"},
+		Config:        cfg,
+		CompiledResults: []*adapters.CompileResult{{
+			Target: "claude",
+			Files: []adapters.ArtifactOp{
+				{Target: "claude", RelPath: ".claude/rules/r1.md", Kind: adapters.OpWriteDropIn, Content: []byte("new rule\n")},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan failed: %v", err)
+	}
+	plan.SidecarWrites = []SidecarWrite{
+		{RelPath: "Agentfile.yaml", Content: []byte("version: 1\n# new yaml\n"), Mode: 0o644},
+		{RelPath: "Agentfile.lock", Content: []byte("version: 1\n# new lock\n"), Mode: 0o644},
+		{RelPath: "new-sidecar.txt", Content: []byte("created\n"), Mode: 0o644},
+	}
+
+	injectedErr := errors.New("simulated sidecar write failure")
+	failedOnce := false
+	var observedJournal []byte
+	var observedBackupYAML []byte
+	var observedBackupLock []byte
+
+	err = CommitWithDeps(plan, FSDeps{
+		Rename: func(oldpath, newpath string) error {
+			if filepath.Base(newpath) == "Agentfile.lock" && !failedOnce {
+				failedOnce = true
+				observedJournal, _ = os.ReadFile(JournalPath(dir))
+				// Read backup contents right before failing.
+				bakRoot := filepath.Join(dir, ".agentfile", "backups")
+				entries, _ := os.ReadDir(bakRoot)
+				if len(entries) > 0 {
+					observedBackupYAML, _ = os.ReadFile(filepath.Join(bakRoot, entries[0].Name(), "Agentfile.yaml"))
+					observedBackupLock, _ = os.ReadFile(filepath.Join(bakRoot, entries[0].Name(), "Agentfile.lock"))
+				}
+				return injectedErr
+			}
+			return os.Rename(oldpath, newpath)
+		},
+		Sleep: func(time.Duration) {},
+	})
+	if !errors.Is(err, injectedErr) {
+		t.Fatalf("expected injectedErr, got %v", err)
+	}
+
+	// Verify commit-journal.json and .agentfile/backups/ captured sidecars before mutation.
+	if len(observedJournal) == 0 {
+		t.Fatalf("expected commit-journal.json to exist during sidecar write")
+	}
+	var cj CommitJournal
+	if err := json.Unmarshal(observedJournal, &cj); err != nil {
+		t.Fatalf("unmarshal observed commit-journal.json: %v", err)
+	}
+	bakMap := map[string]bool{}
+	for _, b := range cj.Backups {
+		bakMap[b.OrigRelPath] = true
+	}
+	if !bakMap["Agentfile.yaml"] || !bakMap["Agentfile.lock"] {
+		t.Fatalf("expected Agentfile.yaml and Agentfile.lock in commit-journal backups, got %+v", cj.Backups)
+	}
+	createdMap := map[string]bool{}
+	for _, cp := range cj.CreatedPaths {
+		createdMap[cp] = true
+	}
+	if !createdMap["new-sidecar.txt"] {
+		t.Fatalf("expected new-sidecar.txt in commit-journal created_paths, got %+v", cj.CreatedPaths)
+	}
+	if string(observedBackupYAML) != "version: 1\n# orig yaml\n" {
+		t.Fatalf("expected Agentfile.yaml backed up prior to mutation, got %q", observedBackupYAML)
+	}
+	if string(observedBackupLock) != "version: 1\n# orig lock\n" {
+		t.Fatalf("expected Agentfile.lock backed up prior to mutation, got %q", observedBackupLock)
+	}
+
+	// Verify rollback restored workspace files AND Agentfile.yaml / Agentfile.lock and removed new-sidecar.txt.
+	if got, _ := os.ReadFile(rulePath); string(got) != "orig rule\n" {
+		t.Fatalf("expected r1.md rolled back to 'orig rule\\n', got %q", got)
+	}
+	if got, _ := os.ReadFile(yamlPath); string(got) != "version: 1\n# orig yaml\n" {
+		t.Fatalf("expected Agentfile.yaml rolled back, got %q", got)
+	}
+	if got, _ := os.ReadFile(lockPath); string(got) != "version: 1\n# orig lock\n" {
+		t.Fatalf("expected Agentfile.lock rolled back, got %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new-sidecar.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected new-sidecar.txt deleted on rollback")
+	}
+	if _, err := os.Stat(JournalPath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected commit-journal.json removed after rollback")
+	}
+
+	// Now commit successfully, then verify no-op Actions with non-empty SidecarWrites does NOT fast-exit.
+	plan.SidecarWrites = plan.SidecarWrites[:2]
+	if err := Commit(plan); err != nil {
+		t.Fatalf("Commit with SidecarWrites failed: %v", err)
+	}
+	if got, _ := os.ReadFile(yamlPath); string(got) != "version: 1\n# new yaml\n" {
+		t.Fatalf("expected Agentfile.yaml updated, got %q", got)
+	}
+	if got, _ := os.ReadFile(lockPath); string(got) != "version: 1\n# new lock\n" {
+		t.Fatalf("expected Agentfile.lock updated, got %q", got)
+	}
+	st, err := LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Targets["claude"].Artifacts["Agentfile.yaml"]; ok {
+		t.Fatalf("SidecarWrites must never be added to state.json")
+	}
+	for _, ex := range plan.AllExcludePath {
+		if ex == "Agentfile.yaml" || ex == "Agentfile.lock" {
+			t.Fatalf("SidecarWrites must never be added to AllExcludePath: %v", plan.AllExcludePath)
+		}
+	}
+
+	// Sidecar-only commit when Actions and PruneOps are empty must NOT take no-op fast exit.
+	sidecarOnlyPlan, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"claude"},
+		Config:        cfg,
+		CompiledResults: []*adapters.CompileResult{{
+			Target: "claude",
+			Files: []adapters.ArtifactOp{
+				{Target: "claude", RelPath: ".claude/rules/r1.md", Kind: adapters.OpWriteDropIn, Content: []byte("new rule\n")},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sidecarOnlyPlan.Actions) != 0 || len(sidecarOnlyPlan.PruneOps) != 0 {
+		t.Fatalf("expected 0 actions/prunes, got %d/%d", len(sidecarOnlyPlan.Actions), len(sidecarOnlyPlan.PruneOps))
+	}
+	sidecarOnlyPlan.SidecarWrites = []SidecarWrite{
+		{RelPath: "Agentfile.yaml", Content: []byte("version: 1\n# sidecar-only\n"), Mode: 0o644},
+	}
+	if err := Commit(sidecarOnlyPlan); err != nil {
+		t.Fatalf("sidecar-only Commit failed: %v", err)
+	}
+	if got, _ := os.ReadFile(yamlPath); string(got) != "version: 1\n# sidecar-only\n" {
+		t.Fatalf("expected sidecar-only Commit not to fast-exit, got %q", got)
+	}
+
+	// Sidecar path escaping project root must fail closed with PolicyError.
+	sidecarOnlyPlan.SidecarWrites = []SidecarWrite{
+		{RelPath: "../escape.yaml", Content: []byte("bad"), Mode: 0o644},
+	}
+	err = Commit(sidecarOnlyPlan)
+	var pe *spec.PolicyError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected PolicyError on escaping sidecar path, got %v", err)
 	}
 }

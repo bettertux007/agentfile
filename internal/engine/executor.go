@@ -102,13 +102,30 @@ func CommitWithDeps(plan *Plan, deps FSDeps) error {
 	}
 
 	// Sound no-op fast exit: only skip Commit if no journal existed, state.json exists on disk,
-	// no file actions or prune operations exist, and prevState == plan.NextState (including ExcludeFingerprint).
-	if !journalExists && len(plan.Actions) == 0 && len(plan.PruneOps) == 0 {
+	// no file actions, prune operations, or sidecar writes exist, and prevState == plan.NextState (including ExcludeFingerprint).
+	if !journalExists && len(plan.Actions) == 0 && len(plan.PruneOps) == 0 && len(plan.SidecarWrites) == 0 {
 		if _, serr := os.Stat(StatePath(plan.ProjectRoot)); serr == nil {
 			if prevState, lerr := LoadState(plan.ProjectRoot); lerr == nil && statesEqual(prevState, plan.NextState) {
 				return nil
 			}
 		}
+	}
+
+	sidecars := make([]SidecarWrite, 0, len(plan.SidecarWrites))
+	for _, sw := range plan.SidecarWrites {
+		cleanRel := filepath.ToSlash(filepath.Clean(filepath.FromSlash(sw.RelPath)))
+		if cleanRel == "" || cleanRel == "." || strings.HasPrefix(cleanRel, "..") || filepath.IsAbs(cleanRel) {
+			return spec.NewPolicyError("sidecar path %q escapes project root", sw.RelPath)
+		}
+		mode := sw.Mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		sidecars = append(sidecars, SidecarWrite{
+			RelPath: cleanRel,
+			Content: sw.Content,
+			Mode:    mode,
+		})
 	}
 
 	allOps := make([]PlannedAction, 0, len(plan.Actions)+len(plan.PruneOps))
@@ -121,38 +138,56 @@ func CommitWithDeps(plan *Plan, deps FSDeps) error {
 		BackupDir: backupRelRoot,
 	}
 
-	// Stage backups for all modified/deleted existing targets before mutating workspace.
-	for _, op := range allOps {
-		abs := filepath.Join(plan.ProjectRoot, filepath.FromSlash(op.RelPath))
+	// Stage backups for all modified/deleted existing targets and sidecars before mutating workspace.
+	staged := make(map[string]bool, len(allOps)+len(sidecars))
+	stageBackup := func(relPath string) error {
+		if staged[relPath] {
+			return nil
+		}
+		staged[relPath] = true
+
+		abs := filepath.Join(plan.ProjectRoot, filepath.FromSlash(relPath))
 		info, lerr := os.Lstat(abs)
 		if errors.Is(lerr, os.ErrNotExist) {
-			journal.CreatedPaths = append(journal.CreatedPaths, op.RelPath)
-			continue
+			journal.CreatedPaths = append(journal.CreatedPaths, relPath)
+			return nil
 		}
 		if lerr != nil {
 			return lerr
 		}
 
 		// Record backup for rollback (and retain permanently when NeedsBackup is true).
-		bakRel := filepath.ToSlash(filepath.Join(backupRelRoot, filepath.FromSlash(op.RelPath)))
+		bakRel := filepath.ToSlash(filepath.Join(backupRelRoot, filepath.FromSlash(relPath)))
 		bakAbs := filepath.Join(plan.ProjectRoot, filepath.FromSlash(bakRel))
 		if info.IsDir() {
 			if err := copyDir(abs, bakAbs); err != nil {
-				return fmt.Errorf("backup directory %s: %w", op.RelPath, err)
+				return fmt.Errorf("backup directory %s: %w", relPath, err)
 			}
 		} else if info.Mode()&os.ModeSymlink != 0 {
 			// For symlinks, don't duplicate target; record symlink not backed up as file.
-			continue
+			return nil
 		} else {
 			if err := copyFile(abs, bakAbs, 0o644); err != nil {
-				return fmt.Errorf("backup file %s: %w", op.RelPath, err)
+				return fmt.Errorf("backup file %s: %w", relPath, err)
 			}
 		}
 		journal.Backups = append(journal.Backups, BackupEntry{
-			OrigRelPath:   op.RelPath,
+			OrigRelPath:   relPath,
 			BackupRelPath: bakRel,
 			IsDir:         info.IsDir(),
 		})
+		return nil
+	}
+
+	for _, op := range allOps {
+		if err := stageBackup(op.RelPath); err != nil {
+			return err
+		}
+	}
+	for _, sw := range sidecars {
+		if err := stageBackup(sw.RelPath); err != nil {
+			return err
+		}
 	}
 
 	jBytes, err := json.MarshalIndent(journal, "", "  ")
@@ -221,6 +256,16 @@ func CommitWithDeps(plan *Plan, deps FSDeps) error {
 				}
 			}
 			ts.OwnedDirs = keptDirs
+		}
+
+		for _, sw := range sidecars {
+			abs := filepath.Join(plan.ProjectRoot, filepath.FromSlash(sw.RelPath))
+			if err := removeIfTypeMismatch(abs, false); err != nil {
+				return err
+			}
+			if err := writeFileAtomicWithDeps(abs, sw.Content, sw.Mode, deps); err != nil {
+				return err
+			}
 		}
 
 		if err := SaveState(plan.ProjectRoot, plan.NextState); err != nil {

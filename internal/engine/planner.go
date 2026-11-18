@@ -16,6 +16,8 @@ import (
 	"github.com/bettertux007/agentfile/internal/store"
 )
 
+const maxOldContentBytes = 1 << 20
+
 // ConflictChoice represents the user or policy resolution for a collision.
 type ConflictChoice string
 
@@ -41,16 +43,33 @@ const (
 	ActionDeletePath OpActionType = "delete_path"
 )
 
+// PlanConflict records a workspace conflict discovered during inspection mode.
+type PlanConflict struct {
+	Target  string `json:"target"`
+	RelPath string `json:"rel_path"`
+	Reason  string `json:"reason"`
+}
+
+// SidecarWrite represents a manifest or lockfile update committed alongside workspace changes.
+type SidecarWrite struct {
+	RelPath string
+	Content []byte
+	Mode    os.FileMode
+}
+
 // PlannedAction is a concrete filesystem mutation computed by Plan.
 type PlannedAction struct {
-	Target      string
-	RelPath     string
-	Type        OpActionType
-	Content     []byte
-	SourcePath  string
-	Mode        os.FileMode
-	NeedsBackup bool
-	Record      ArtifactRecord
+	Target        string
+	RelPath       string
+	Type          OpActionType
+	Content       []byte
+	OldContent    []byte
+	OldKind       string
+	OldLinkTarget string
+	SourcePath    string
+	Mode          os.FileMode
+	NeedsBackup   bool
+	Record        ArtifactRecord
 }
 
 // SecuritySummary highlights security-sensitive entries introduced or present in the sync.
@@ -67,6 +86,7 @@ type PlanSummary struct {
 	Updated            []string        `json:"updated,omitempty"`
 	Pruned             []string        `json:"pruned,omitempty"`
 	Unchanged          []string        `json:"unchanged,omitempty"`
+	Conflicts          []PlanConflict  `json:"conflicts,omitempty"`
 	Warnings           []string        `json:"warnings,omitempty"`
 	SecurityHighlights SecuritySummary `json:"security_highlights,omitempty"`
 }
@@ -78,6 +98,8 @@ type Plan struct {
 	GitExclude     bool
 	Actions        []PlannedAction
 	PruneOps       []PlannedAction
+	Conflicts      []PlanConflict
+	SidecarWrites  []SidecarWrite
 	NextState      *State
 	AllExcludePath []string
 	Summary        PlanSummary
@@ -99,13 +121,14 @@ type PolicyValidator func(target string, mergedFiles map[string][]byte) []adapte
 
 // PlanInput bundles inputs for Plan without coupling engine to concrete adapters.
 type PlanInput struct {
-	ProjectRoot     string
-	ActiveTargets   []string
-	Config          *config.EffectiveConfig
-	Bundle          *ir.Bundle
-	CompiledResults []*adapters.CompileResult
-	ValidatePolicy  PolicyValidator
-	Prompter        Prompter
+	ProjectRoot      string
+	ActiveTargets    []string
+	Config           *config.EffectiveConfig
+	Bundle           *ir.Bundle
+	CompiledResults  []*adapters.CompileResult
+	ValidatePolicy   PolicyValidator
+	Prompter         Prompter
+	InspectConflicts bool
 }
 
 // BuildPlan computes all filesystem operations, detects collisions, runs 3-way merges,
@@ -178,6 +201,28 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 	}
 
 	// 3. Plan operations per active target.
+	type conflictKey struct {
+		target  string
+		relPath string
+	}
+	seenConflicts := make(map[conflictKey]bool)
+	recordConflict := func(target, relPath, reason string) (bool, bool, error) {
+		if in.InspectConflicts && (in.Config.OnConflict == "ask" || in.Config.OnConflict == "fail") {
+			key := conflictKey{target: target, relPath: relPath}
+			if !seenConflicts[key] {
+				seenConflicts[key] = true
+				plan.Conflicts = append(plan.Conflicts, PlanConflict{
+					Target:  target,
+					RelPath: relPath,
+					Reason:  reason,
+				})
+			}
+			return true, false, nil
+		}
+		return resolveConflictChoice(relPath, reason, in.Config.OnConflict, in.Prompter)
+	}
+	sourceHashes := make(map[string]string)
+
 	for _, target := range in.ActiveTargets {
 		if nextState.Targets[target] == nil {
 			nextState.Targets[target] = &TargetState{Artifacts: make(map[string]ArtifactRecord)}
@@ -208,6 +253,10 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 				} else if !errors.Is(err, os.ErrNotExist) {
 					return nil, err
 				}
+				oldKind, oldLinkTarget, oldContent, _, ierr := inspectExistingPath(absPath, existing)
+				if ierr != nil {
+					return nil, ierr
+				}
 
 				var prevPtr *ArtifactRecord
 				if wasOwned {
@@ -215,7 +264,7 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 					prevPtr = &cp
 				}
 				mergedBytes, nextRec, needsBackup, err := MergeJSONC(existing, exists, op.JSONMerge, prevPtr, func(detail string) (bool, bool, error) {
-					return resolveConflictChoice(op.RelPath, detail, in.Config.OnConflict, in.Prompter)
+					return recordConflict(target, op.RelPath, detail)
 				})
 				if err != nil {
 					return nil, err
@@ -233,13 +282,16 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 				}
 
 				plan.Actions = append(plan.Actions, PlannedAction{
-					Target:      target,
-					RelPath:     op.RelPath,
-					Type:        ActionWriteFile,
-					Content:     mergedBytes,
-					Mode:        0o644,
-					NeedsBackup: needsBackup && exists,
-					Record:      nextRec,
+					Target:        target,
+					RelPath:       op.RelPath,
+					Type:          ActionWriteFile,
+					Content:       mergedBytes,
+					OldContent:    oldContent,
+					OldKind:       oldKind,
+					OldLinkTarget: oldLinkTarget,
+					Mode:          0o644,
+					NeedsBackup:   needsBackup && exists,
+					Record:        nextRec,
 				})
 
 			case adapters.OpManagedBlock:
@@ -251,6 +303,10 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 				} else if !errors.Is(err, os.ErrNotExist) {
 					return nil, err
 				}
+				oldKind, oldLinkTarget, oldContent, _, ierr := inspectExistingPath(absPath, existing)
+				if ierr != nil {
+					return nil, ierr
+				}
 
 				var prevPtr *ArtifactRecord
 				if wasOwned {
@@ -258,7 +314,7 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 					prevPtr = &cp
 				}
 				mergedBytes, nextRec, needsBackup, err := MergeMarkdownBlock(existing, exists, op.Content, prevPtr, func(detail string) (bool, bool, error) {
-					return resolveConflictChoice(op.RelPath, detail, in.Config.OnConflict, in.Prompter)
+					return recordConflict(target, op.RelPath, detail)
 				})
 				if err != nil {
 					return nil, err
@@ -275,22 +331,27 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 				}
 
 				plan.Actions = append(plan.Actions, PlannedAction{
-					Target:      target,
-					RelPath:     op.RelPath,
-					Type:        ActionWriteFile,
-					Content:     mergedBytes,
-					Mode:        0o644,
-					NeedsBackup: needsBackup && exists,
-					Record:      nextRec,
+					Target:        target,
+					RelPath:       op.RelPath,
+					Type:          ActionWriteFile,
+					Content:       mergedBytes,
+					OldContent:    oldContent,
+					OldKind:       oldKind,
+					OldLinkTarget: oldLinkTarget,
+					Mode:          0o644,
+					NeedsBackup:   needsBackup && exists,
+					Record:        nextRec,
 				})
 
 			case adapters.OpWriteOwned, adapters.OpWriteDropIn:
-				_, lerr := os.Lstat(absPath)
-				exists := lerr == nil
+				oldKind, oldLinkTarget, oldContent, exists, lerr := inspectExistingPath(absPath, nil)
+				if lerr != nil {
+					return nil, lerr
+				}
 				needsBackup := false
 
 				if exists && !wasOwned {
-					overwrite, backup, err := resolveConflictChoice(op.RelPath, "unmanaged file already exists on disk", in.Config.OnConflict, in.Prompter)
+					overwrite, backup, err := recordConflict(target, op.RelPath, "unmanaged file already exists on disk")
 					if err != nil {
 						return nil, err
 					}
@@ -310,9 +371,17 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 				nextState.Targets[target].Artifacts[op.RelPath] = rec
 
 				if exists {
-					if curBytes, rerr := os.ReadFile(absPath); rerr == nil && bytes.Equal(curBytes, op.Content) && wasOwned {
-						plan.Summary.Unchanged = append(plan.Summary.Unchanged, op.RelPath)
-						continue
+					if wasOwned && oldKind == "file" {
+						if oldContent != nil && bytes.Equal(oldContent, op.Content) {
+							plan.Summary.Unchanged = append(plan.Summary.Unchanged, op.RelPath)
+							continue
+						}
+						if oldContent == nil {
+							if curBytes, rerr := os.ReadFile(absPath); rerr == nil && bytes.Equal(curBytes, op.Content) {
+								plan.Summary.Unchanged = append(plan.Summary.Unchanged, op.RelPath)
+								continue
+							}
+						}
 					}
 					plan.Summary.Updated = append(plan.Summary.Updated, op.RelPath)
 					if !wasOwned {
@@ -323,22 +392,27 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 				}
 
 				plan.Actions = append(plan.Actions, PlannedAction{
-					Target:      target,
-					RelPath:     op.RelPath,
-					Type:        ActionWriteFile,
-					Content:     op.Content,
-					Mode:        0o644,
-					NeedsBackup: needsBackup && exists,
-					Record:      rec,
+					Target:        target,
+					RelPath:       op.RelPath,
+					Type:          ActionWriteFile,
+					Content:       op.Content,
+					OldContent:    oldContent,
+					OldKind:       oldKind,
+					OldLinkTarget: oldLinkTarget,
+					Mode:          0o644,
+					NeedsBackup:   needsBackup && exists,
+					Record:        rec,
 				})
 
 			case adapters.OpMaterializeTree:
-				_, lerr := os.Lstat(absPath)
-				exists := lerr == nil
+				oldKind, oldLinkTarget, oldContent, exists, lerr := inspectExistingPath(absPath, nil)
+				if lerr != nil {
+					return nil, lerr
+				}
 				needsBackup := false
 
 				if exists && !wasOwned {
-					overwrite, backup, err := resolveConflictChoice(op.RelPath, "unmanaged path already exists on disk", in.Config.OnConflict, in.Prompter)
+					overwrite, backup, err := recordConflict(target, op.RelPath, "unmanaged path already exists on disk")
 					if err != nil {
 						return nil, err
 					}
@@ -354,9 +428,14 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 					plan.Summary.Warnings = append(plan.Summary.Warnings, fmt.Sprintf("[%s] %s is a remote dependency; materializing as copy instead of symlink", target, op.RelPath))
 				}
 
-				treeHash, herr := store.HashTree(op.SourcePath)
-				if herr != nil {
-					return nil, herr
+				treeHash, ok := sourceHashes[op.SourcePath]
+				if !ok {
+					var herr error
+					treeHash, herr = store.HashTree(op.SourcePath)
+					if herr != nil {
+						return nil, herr
+					}
+					sourceHashes[op.SourcePath] = treeHash
 				}
 
 				actionType := ActionCopyTree
@@ -374,7 +453,7 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 
 				if exists && wasOwned && prevRec.ArtifactType == artType {
 					if artType == TypeSymlink {
-						if dest, rerr := os.Readlink(absPath); rerr == nil && dest == op.SourcePath {
+						if oldKind == "symlink" && oldLinkTarget == op.SourcePath {
 							plan.Summary.Unchanged = append(plan.Summary.Unchanged, op.RelPath)
 							continue
 						}
@@ -391,12 +470,15 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 				}
 
 				plan.Actions = append(plan.Actions, PlannedAction{
-					Target:      target,
-					RelPath:     op.RelPath,
-					Type:        actionType,
-					SourcePath:  op.SourcePath,
-					NeedsBackup: needsBackup && exists,
-					Record:      rec,
+					Target:        target,
+					RelPath:       op.RelPath,
+					Type:          actionType,
+					OldContent:    oldContent,
+					OldKind:       oldKind,
+					OldLinkTarget: oldLinkTarget,
+					SourcePath:    op.SourcePath,
+					NeedsBackup:   needsBackup && exists,
+					Record:        rec,
 				})
 			}
 		}
@@ -431,18 +513,32 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		}
 
 		// Plan pruning for artifacts previously owned by this target that are no longer desired.
-		for oldRel, oldRec := range prevTargetState.Artifacts {
-			if desiredPaths[oldRel] {
-				continue
+		oldRels := make([]string, 0, len(prevTargetState.Artifacts))
+		for oldRel := range prevTargetState.Artifacts {
+			if !desiredPaths[oldRel] {
+				oldRels = append(oldRels, oldRel)
 			}
+		}
+		sort.Strings(oldRels)
+
+		for _, oldRel := range oldRels {
+			oldRec := prevTargetState.Artifacts[oldRel]
 			delete(nextState.Targets[target].Artifacts, oldRel)
 			absOld := filepath.Join(in.ProjectRoot, filepath.FromSlash(oldRel))
-			if _, err := os.Lstat(absOld); errors.Is(err, os.ErrNotExist) {
+			oldKind, oldLinkTarget, oldContent, oldExists, ierr := inspectExistingPath(absOld, nil)
+			if ierr != nil {
+				return nil, ierr
+			}
+			if !oldExists {
 				continue
 			}
 
 			if oldRec.ArtifactType == TypeJSONCPatch {
-				curBytes, err := os.ReadFile(absOld)
+				curBytes := oldContent
+				var err error
+				if curBytes == nil {
+					curBytes, err = os.ReadFile(absOld)
+				}
 				if err == nil {
 					updatedBytes, deleteFile, rerr := RemoveJSONC(curBytes, oldRec)
 					if rerr != nil {
@@ -451,11 +547,14 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 					if !deleteFile {
 						plan.Summary.Updated = append(plan.Summary.Updated, oldRel)
 						plan.PruneOps = append(plan.PruneOps, PlannedAction{
-							Target:  target,
-							RelPath: oldRel,
-							Type:    ActionWriteFile,
-							Content: updatedBytes,
-							Mode:    0o644,
+							Target:        target,
+							RelPath:       oldRel,
+							Type:          ActionWriteFile,
+							Content:       updatedBytes,
+							OldContent:    oldContent,
+							OldKind:       oldKind,
+							OldLinkTarget: oldLinkTarget,
+							Mode:          0o644,
 						})
 						continue
 					}
@@ -463,7 +562,11 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 			}
 
 			if oldRec.ArtifactType == TypeMarkdownBlock {
-				curBytes, err := os.ReadFile(absOld)
+				curBytes := oldContent
+				var err error
+				if curBytes == nil {
+					curBytes, err = os.ReadFile(absOld)
+				}
 				if err == nil {
 					updatedBytes, deleteFile, rerr := RemoveMarkdownBlock(curBytes, oldRec)
 					if rerr != nil {
@@ -472,11 +575,14 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 					if !deleteFile {
 						plan.Summary.Updated = append(plan.Summary.Updated, oldRel)
 						plan.PruneOps = append(plan.PruneOps, PlannedAction{
-							Target:  target,
-							RelPath: oldRel,
-							Type:    ActionWriteFile,
-							Content: updatedBytes,
-							Mode:    0o644,
+							Target:        target,
+							RelPath:       oldRel,
+							Type:          ActionWriteFile,
+							Content:       updatedBytes,
+							OldContent:    oldContent,
+							OldKind:       oldKind,
+							OldLinkTarget: oldLinkTarget,
+							Mode:          0o644,
 						})
 						continue
 					}
@@ -485,11 +591,18 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 
 			plan.Summary.Pruned = append(plan.Summary.Pruned, oldRel)
 			plan.PruneOps = append(plan.PruneOps, PlannedAction{
-				Target:  target,
-				RelPath: oldRel,
-				Type:    ActionDeletePath,
+				Target:        target,
+				RelPath:       oldRel,
+				Type:          ActionDeletePath,
+				OldContent:    oldContent,
+				OldKind:       oldKind,
+				OldLinkTarget: oldLinkTarget,
 			})
 		}
+	}
+
+	if len(plan.Conflicts) > 0 {
+		plan.Summary.Conflicts = append([]PlanConflict(nil), plan.Conflicts...)
 	}
 
 	// Build complete exclude list across all targets retained in NextState.
@@ -509,6 +622,80 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 	)))
 
 	return plan, nil
+}
+
+// CheckWorkspaceDrift reports whether the workspace has drifted from plan or needs sync/recovery.
+func CheckWorkspaceDrift(projectRoot string, plan *Plan) (bool, string) {
+	if plan == nil {
+		return true, "missing plan"
+	}
+	if projectRoot == "" {
+		projectRoot = plan.ProjectRoot
+	}
+	if len(plan.Conflicts) > 0 {
+		return true, fmt.Sprintf("%d conflict(s) detected", len(plan.Conflicts))
+	}
+	if len(plan.Actions) > 0 {
+		return true, fmt.Sprintf("%d pending action(s)", len(plan.Actions))
+	}
+	if len(plan.PruneOps) > 0 {
+		return true, fmt.Sprintf("%d pending prune operation(s)", len(plan.PruneOps))
+	}
+	if _, err := os.Stat(JournalPath(projectRoot)); err == nil {
+		return true, "pending commit journal (.agentfile/commit-journal.json)"
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return true, fmt.Sprintf("stat commit journal: %v", err)
+	}
+	if _, err := os.Stat(StatePath(projectRoot)); errors.Is(err, os.ErrNotExist) {
+		return true, "missing .agentfile/state.json"
+	} else if err != nil {
+		return true, fmt.Sprintf("stat state: %v", err)
+	}
+	prevState, err := LoadState(projectRoot)
+	if err != nil {
+		return true, fmt.Sprintf("load state: %v", err)
+	}
+	if plan.NextState != nil && prevState.ExcludeFingerprint != plan.NextState.ExcludeFingerprint {
+		return true, "git exclude fingerprint mismatch"
+	}
+	if !StatesEqual(prevState, plan.NextState) {
+		return true, "workspace state differs from plan"
+	}
+	return false, ""
+}
+
+func inspectExistingPath(absPath string, preloaded []byte) (oldKind, oldLinkTarget string, oldContent []byte, exists bool, err error) {
+	info, lerr := os.Lstat(absPath)
+	if lerr != nil {
+		if errors.Is(lerr, os.ErrNotExist) {
+			return "", "", nil, false, nil
+		}
+		return "", "", nil, false, lerr
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, rerr := os.Readlink(absPath)
+		if rerr != nil {
+			return "symlink", "", nil, true, rerr
+		}
+		return "symlink", target, nil, true, nil
+	}
+	if info.IsDir() {
+		return "dir", "", nil, true, nil
+	}
+	if info.Mode().IsRegular() {
+		if info.Size() <= maxOldContentBytes {
+			if preloaded != nil {
+				return "file", "", bytes.Clone(preloaded), true, nil
+			}
+			b, rerr := os.ReadFile(absPath)
+			if rerr != nil {
+				return "file", "", nil, true, rerr
+			}
+			return "file", "", b, true, nil
+		}
+		return "file", "", nil, true, nil
+	}
+	return "", "", nil, true, nil
 }
 
 func resolveConflictChoice(relPath, reason, policy string, prompter Prompter) (overwrite bool, backup bool, err error) {
