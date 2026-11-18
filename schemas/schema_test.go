@@ -62,3 +62,23 @@ func TestValidateLocalConfigAndLockSchemas(t *testing.T) {
 		t.Fatalf("expected error on invalid lockfile entry")
 	}
 }
+
+func TestValidateUserGlobalConfigSchema(t *testing.T) {
+	t.Parallel()
+	userGlobalCfg := []byte("version: 1\nlink_mode: symlink\non_conflict: backup\ngit_exclude: false\nload_global: true\n")
+	if err := ValidateLocalConfigV1(userGlobalCfg); err != nil {
+		t.Fatalf("expected valid user-global config payload: %v", err)
+	}
+	if err := ValidateLocalConfigV1([]byte("version: 1\nunknown_pref: true\n")); err == nil {
+		t.Fatalf("expected error on unknown field in user-global config")
+	}
+
+	schemaBytes, err := os.ReadFile(filepath.Join("v1", "agentfile-config.schema.json"))
+	if err != nil {
+		t.Fatalf("read agentfile-config.schema.json: %v", err)
+	}
+	schemaText := string(schemaBytes)
+	if !strings.Contains(schemaText, ".agentfile/config.yaml") || !strings.Contains(schemaText, "~/.config/agentfile/config.yaml") {
+		t.Fatalf("expected agentfile-config.schema.json description to mention both .agentfile/config.yaml and ~/.config/agentfile/config.yaml")
+	}
+}

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/bettertux007/agentfile/schemas/v1/agentfile-config.schema.json",
   "title": "Agentfile Local Tool Config (v1)",
-  "description": "Machine-local workflow preferences stored in .agentfile/config.yaml.",
+  "description": "Machine-local workflow preferences stored in .agentfile/config.yaml or user-global personal defaults in ~/.config/agentfile/config.yaml.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version"],
