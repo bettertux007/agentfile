@@ -194,6 +194,8 @@ func newStatusCmd(ec *execContext) *cobra.Command {
 							conflictsByTarget[c.Target] = append(conflictsByTarget[c.Target], c)
 						}
 
+						excludeMismatch := plan.NextState != nil && (prevState == nil || prevState.ExcludeFingerprint != plan.NextState.ExcludeFingerprint)
+						gitExcludeToggled := excludeMismatch && stringSlicesEqual(collectStatePaths(prevState), plan.AllExcludePath)
 						for i := range targetReports {
 							t := targetReports[i].Target
 							var dpaths []string
@@ -205,12 +207,23 @@ func newStatusCmd(ec *execContext) *cobra.Command {
 							targetReports[i].Conflicts = conflictsByTarget[t]
 
 							targetSynced := stateExists && prevState != nil && prevState.Targets[t] != nil
+							targetStateDrifted := false
+							if targetSynced {
+								var nextTargetState *engine.TargetState
+								if plan.NextState != nil {
+									nextTargetState = plan.NextState.Targets[t]
+								}
+								targetStateDrifted = !engine.StatesEqual(
+									&engine.State{Version: engine.StateVersion, Targets: map[string]*engine.TargetState{t: prevState.Targets[t]}},
+									&engine.State{Version: engine.StateVersion, Targets: map[string]*engine.TargetState{t: nextTargetState}},
+								)
+							}
 							switch {
 							case len(conflictsByTarget[t]) > 0:
 								targetReports[i].Status = "conflict"
 							case !targetSynced:
 								targetReports[i].Status = "not_synced"
-							case len(dpaths) > 0 || rep.CommitJournalPending || drifted:
+							case len(dpaths) > 0 || rep.CommitJournalPending || targetStateDrifted || gitExcludeToggled:
 								targetReports[i].Status = "drifted"
 							default:
 								targetReports[i].Status = "in_sync"
@@ -419,6 +432,39 @@ func verifyTargetStateOnDisk(projectRoot string, st *engine.State, target string
 		}
 	}
 	return drifted
+}
+
+func collectStatePaths(st *engine.State) []string {
+	if st == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, ts := range st.Targets {
+		if ts == nil {
+			continue
+		}
+		for rel := range ts.Artifacts {
+			seen[rel] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for rel := range seen {
+		out = append(out, rel)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func sha256File(path string) (string, error) {

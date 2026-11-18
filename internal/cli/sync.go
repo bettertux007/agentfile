@@ -249,6 +249,8 @@ func executeSyncWithSpec(
 		}
 	}
 
+	redactPlanSummary(&plan.Summary)
+
 	if opts.CheckOnly {
 		if drifted, reason := engine.CheckWorkspaceDrift(ec.workDir, plan); drifted {
 			return nil, spec.NewPolicyError("workspace is out of sync with Agentfile.yaml: %s (run 'agentfile sync')", reason)
@@ -268,6 +270,7 @@ func executeSyncWithSpec(
 	if err := engine.Commit(plan); err != nil {
 		return nil, err
 	}
+	redactPlanSummary(&plan.Summary)
 
 	if (len(nextLock.Dependencies) > 0 && lf == nil) || (lf != nil && !locksEqual(lf, nextLock)) {
 		if err := spec.SaveLock(lockPath, nextLock); err != nil {
@@ -277,7 +280,7 @@ func executeSyncWithSpec(
 
 	if opts.QuietStdout {
 		for _, warn := range plan.Summary.Warnings {
-			fmt.Fprintf(ec.errOut, "warning: %s\n", diff.RedactSecrets(warn))
+			fmt.Fprintf(ec.errOut, "warning: %s\n", warn)
 		}
 		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
 	}
@@ -286,6 +289,27 @@ func executeSyncWithSpec(
 		return nil, err
 	}
 	return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
+}
+
+func redactPlanSummary(s *engine.PlanSummary) {
+	if s == nil {
+		return
+	}
+	for i, w := range s.Warnings {
+		s.Warnings[i] = diff.RedactSecrets(w)
+	}
+	for i, h := range s.SecurityHighlights.Hooks {
+		s.SecurityHighlights.Hooks[i] = diff.RedactSecrets(h)
+	}
+	for i, m := range s.SecurityHighlights.StdioMCPs {
+		s.SecurityHighlights.StdioMCPs[i] = diff.RedactSecrets(m)
+	}
+	for i, a := range s.SecurityHighlights.AllowCommands {
+		s.SecurityHighlights.AllowCommands[i] = diff.RedactSecrets(a)
+	}
+	for i, d := range s.SecurityHighlights.DenyCommands {
+		s.SecurityHighlights.DenyCommands[i] = diff.RedactSecrets(d)
+	}
 }
 
 func locksEqual(a, b *spec.Lockfile) bool {
@@ -338,6 +362,7 @@ func (p *ttyPrompter) AskConflict(relPath, reason string) (engine.ConflictChoice
 }
 
 func printSummary(w io.Writer, s *engine.PlanSummary, dryRun bool, asJSON bool) error {
+	redactPlanSummary(s)
 	if asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")

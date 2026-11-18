@@ -782,6 +782,7 @@ rules:
 	}
 
 	// 3. Modify synced target file -> drifted, --check exits 2, without --check exits 0.
+	// Unmodified target (claude) must remain in_sync while modified target (cursor) reports drifted.
 	_ = os.WriteFile(filepath.Join(proj, ".cursor", "rules", "agentfile-style.mdc"), []byte("tampered\n"), 0o644)
 	out.Reset()
 	errOut.Reset()
@@ -792,6 +793,18 @@ rules:
 	_ = json.Unmarshal(out.Bytes(), &stDrifted)
 	if stDrifted["drifted"] != true {
 		t.Fatalf("expected drifted=true, got %+v", stDrifted)
+	}
+	driftedTargets, _ := stDrifted["per_target"].([]any)
+	targetStatusMap := make(map[string]map[string]any, len(driftedTargets))
+	for _, pt := range driftedTargets {
+		m := pt.(map[string]any)
+		targetStatusMap[m["target"].(string)] = m
+	}
+	if targetStatusMap["claude"]["status"] != "in_sync" {
+		t.Fatalf("expected unmodified target claude to remain in_sync, got %+v", targetStatusMap["claude"])
+	}
+	if targetStatusMap["cursor"]["status"] != "drifted" {
+		t.Fatalf("expected modified target cursor to report drifted, got %+v", targetStatusMap["cursor"])
 	}
 	out.Reset()
 	errOut.Reset()
@@ -1399,5 +1412,57 @@ func TestUserGlobalConfigDoctorRunAndSync(t *testing.T) {
 	}
 	if got := redactEnvValue("OPENCODE_CONFIG_DIR", "/tmp/empty-cfg"); got != "/tmp/empty-cfg" {
 		t.Fatalf("expected non-secret env preserved, got %q", got)
+	}
+}
+
+func TestSyncDryRunJSONWarningRedaction(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	proj := t.TempDir()
+	manifest := `version: 1
+targets: [cursor]
+mcp:
+  api:
+    transport: http
+    url: "https://api.example.com/mcp"
+    headers:
+      Authorization: "Bearer ${TOKEN:-ghp_secret123456}"
+settings:
+  hooks:
+    PostToolUse:
+      - matcher: "Bash"
+        command: "curl -H 'Authorization: Bearer raw-hook-secret-999' https://example.com"
+targets_config:
+  cursor:
+    on_unsupported: warn
+`
+	_ = os.WriteFile(filepath.Join(proj, "Agentfile.yaml"), []byte(manifest), 0o644)
+
+	var out, errOut bytes.Buffer
+	if code := ExecuteWithIO([]string{"sync", "--dry-run", "--json"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("sync --dry-run --json failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	rawJSON := out.String()
+	for _, leaked := range []string{"ghp_secret123456", "raw-hook-secret-999"} {
+		if strings.Contains(rawJSON, leaked) {
+			t.Fatalf("secret %q leaked in sync --dry-run --json output:\n%s", leaked, rawJSON)
+		}
+	}
+	var sum map[string]any
+	if err := json.Unmarshal(out.Bytes(), &sum); err != nil {
+		t.Fatalf("invalid dry-run JSON: %v\n%s", err, rawJSON)
+	}
+	warns, _ := sum["warnings"].([]any)
+	if len(warns) < 2 {
+		t.Fatalf("expected redacted warnings in dry-run JSON, got %+v", warns)
+	}
+	joined := ""
+	for _, w := range warns {
+		joined += w.(string) + "\n"
+	}
+	if !strings.Contains(joined, "${TOKEN:-[REDACTED]}") || !strings.Contains(joined, "Bearer [REDACTED]") {
+		t.Fatalf("expected redacted placeholders/headers in warnings:\n%s", joined)
 	}
 }
