@@ -15,6 +15,8 @@ import (
 	"github.com/bettertux007/agentfile/internal/diff"
 	"github.com/bettertux007/agentfile/internal/engine"
 	"github.com/bettertux007/agentfile/internal/runner"
+	"github.com/bettertux007/agentfile/internal/spec"
+	"github.com/bettertux007/agentfile/schemas"
 )
 
 func TestInitSyncCleanEndToEnd(t *testing.T) {
@@ -2301,5 +2303,568 @@ targets_config:
 	}
 	if len(docRep.GlobalConflicts) != 1 || docRep.GlobalConflicts[0].ServerName != "github" || !strings.HasSuffix(docRep.GlobalConflicts[0].GlobalFile, filepath.Join(".codex", "config.toml")) {
 		t.Fatalf("expected global TOML MCP conflict for github in .codex/config.toml, got %+v", docRep.GlobalConflicts)
+	}
+}
+
+func TestInitImportEndToEnd(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	proj := t.TempDir()
+
+	// Initialize git repo to verify vcs.SyncExcludes leaves .agentfile/imported/ trackable while excluding state.json.
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = proj
+	if b, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, b)
+	}
+
+	// 1. Seed brownfield repo across all 7 tools.
+	// MCP: .mcp.json (claude), opencode.json (opencode), .vscode/mcp.json (copilot), .codex/config.toml (codex),
+	// plus .gemini/settings.json (gemini) and .cursor/mcp.json (cursor) for complete coverage.
+	_ = os.WriteFile(filepath.Join(proj, ".mcp.json"), []byte(`{
+  // comment in jsonc
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_PAT}",
+        "X-Api-Key": "${API_KEY}"
+      }
+    },
+    "fs": {
+      "command": "npx",
+      "args": ["-y", "@mcp/fs", "."],
+      "env": {
+        "FS_TOKEN": "${FS_TOKEN}"
+      }
+    }
+  }
+}
+`), 0o644)
+
+	_ = os.WriteFile(filepath.Join(proj, "opencode.json"), []byte(`{
+  "mcp": {
+    "github": {
+      "type": "remote",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer {env:GITHUB_PAT}",
+        "X-Api-Key": "{env:API_KEY}"
+      }
+    },
+    "fs": {
+      "type": "local",
+      "command": ["npx", "-y", "@mcp/fs", "."],
+      "environment": {
+        "FS_TOKEN": "{env:FS_TOKEN}"
+      }
+    }
+  },
+  "permission": {
+    "bash": {
+      "go test *": "allow",
+      "rm -rf *": "deny"
+    }
+  }
+}
+`), 0o644)
+
+	_ = os.MkdirAll(filepath.Join(proj, ".vscode"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".vscode", "mcp.json"), []byte(`{
+  "servers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${env:GITHUB_PAT}",
+        "X-Api-Key": "${env:API_KEY}"
+      }
+    }
+  }
+}
+`), 0o644)
+
+	_ = os.MkdirAll(filepath.Join(proj, ".codex"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".codex", "config.toml"), []byte(`[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+bearer_token_env_var = "GITHUB_PAT"
+env_http_headers = { "X-Api-Key" = "API_KEY" }
+
+[mcp_servers.fs]
+command = "npx"
+args = ["-y", "@mcp/fs", "."]
+env_vars = ["FS_TOKEN"]
+`), 0o644)
+
+	// Claude settings: allow, deny, hooks.
+	_ = os.MkdirAll(filepath.Join(proj, ".claude"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".claude", "settings.json"), []byte(`{
+  "permissions": {
+    "allow": ["Bash(go vet:*)"],
+    "deny": ["Bash(rm -rf *)"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/guard.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+`), 0o644)
+
+	// Identical skill in .claude/skills/auditor and .agents/skills/auditor -> deduplicated cleanly.
+	for _, skillDir := range []string{
+		filepath.Join(proj, ".claude", "skills", "auditor"),
+		filepath.Join(proj, ".agents", "skills", "auditor"),
+	} {
+		_ = os.MkdirAll(skillDir, 0o755)
+		_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Auditor Skill\nAudit carefully.\n"), 0o644)
+	}
+
+	// Agent in .claude/agents/reviewer.md with frontmatter.
+	_ = os.MkdirAll(filepath.Join(proj, ".claude", "agents"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".claude", "agents", "reviewer.md"), []byte("---\ndescription: \"Reviews PRs\"\nmodel: sonnet\n---\n\nReview code for bugs.\n"), 0o644)
+
+	// Cursor rule .cursor/rules/style.mdc.
+	_ = os.MkdirAll(filepath.Join(proj, ".cursor", "rules"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".cursor", "rules", "style.mdc"), []byte("---\ndescription: Go style\nglobs: \"**/*.go\"\nalwaysApply: false\n---\n\nRun gofmt.\n"), 0o644)
+
+	// Windsurf rule .windsurf/rules/sec.md.
+	_ = os.MkdirAll(filepath.Join(proj, ".windsurf", "rules"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".windsurf", "rules", "sec.md"), []byte("---\ntrigger: always_on\ndescription: Security baseline\n---\n\nNever hardcode secrets.\n"), 0o644)
+
+	// AGENTS.md with managed block markers and ## <name> sections.
+	_ = os.WriteFile(filepath.Join(proj, "AGENTS.md"), []byte(`<!-- BEGIN AGENTFILE:v1 deadbeef -->
+# Project Agent Instructions
+
+## architecture
+
+*Scope:* Architectural invariants
+*Applies to:* `+"`internal/**/*.go`"+`
+
+Keep adapters I/O-free.
+<!-- END AGENTFILE:v1 -->
+`), 0o644)
+
+	// Symlink escaping repo root MUST be ignored without failing or reading external files.
+	outsideDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(outsideDir, "SKILL.md"), []byte("secret external"), 0o644)
+	_ = os.Symlink(outsideDir, filepath.Join(proj, ".claude", "skills", "escaped-skill"))
+
+	var out, errOut bytes.Buffer
+
+	// 2. init --import --dry-run --json emits preview without creating Agentfile.yaml or .agentfile/imported/.
+	code := ExecuteWithIO([]string{"init", "--import", "--dry-run", "--json"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false })
+	if code != 0 {
+		t.Fatalf("init --import --dry-run --json failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, "Agentfile.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run must not create Agentfile.yaml")
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".agentfile", "imported")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run must not create .agentfile/imported")
+	}
+	var dryRep map[string]any
+	if err := json.Unmarshal(out.Bytes(), &dryRep); err != nil {
+		t.Fatalf("invalid init --import --dry-run --json output: %v\n%s", err, out.String())
+	}
+	if dryRep["dry_run"] != true {
+		t.Fatalf("expected dry_run=true, got %+v", dryRep)
+	}
+
+	// 3. init --import writes .agentfile/imported/ and valid Agentfile.yaml.
+	out.Reset()
+	errOut.Reset()
+	code = ExecuteWithIO([]string{"init", "--import"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false })
+	if code != 0 {
+		t.Fatalf("init --import failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+
+	manifestPath := filepath.Join(proj, "Agentfile.yaml")
+	rawManifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read Agentfile.yaml: %v", err)
+	}
+	if err := schemas.ValidateAgentfileV1(rawManifest); err != nil {
+		t.Fatalf("generated Agentfile.yaml failed JSON schema: %v\n%s", err, rawManifest)
+	}
+	ps, err := spec.ParseFile(manifestPath)
+	if err != nil {
+		t.Fatalf("generated Agentfile.yaml failed spec.ParseFile: %v\n%s", err, rawManifest)
+	}
+
+	// Verify env normalization (${VAR}, no {env:VAR} or ${env:VAR}).
+	mStr := string(rawManifest)
+	if strings.Contains(mStr, "{env:") {
+		t.Fatalf("expected {env:VAR} and ${env:VAR} normalized to ${VAR}, got:\n%s", mStr)
+	}
+	if !strings.Contains(mStr, "Bearer ${GITHUB_PAT}") || !strings.Contains(mStr, "FS_TOKEN: ${FS_TOKEN}") || !strings.Contains(mStr, "X-Api-Key: ${API_KEY}") {
+		t.Fatalf("expected normalized env placeholders in Agentfile.yaml:\n%s", mStr)
+	}
+	if _, ok := ps.MCP["github"]; !ok || ps.MCP["github"].Transport != "http" {
+		t.Fatalf("expected deduplicated github http MCP, got %+v", ps.MCP)
+	}
+	if _, ok := ps.MCP["fs"]; !ok || ps.MCP["fs"].Transport != "stdio" {
+		t.Fatalf("expected deduplicated fs stdio MCP, got %+v", ps.MCP)
+	}
+
+	// Verify skill deduplication + escaping symlink ignored.
+	if len(ps.Skills) != 1 || ps.Skills[0].Name != "auditor" || ps.Skills[0].Source.Raw != "./.agentfile/imported/skills/auditor" {
+		t.Fatalf("expected single deduplicated auditor skill from .agentfile/imported, got %+v", ps.Skills)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".agentfile", "imported", "skills", "auditor", "SKILL.md")); err != nil {
+		t.Fatalf("expected extracted skill SKILL.md: %v", err)
+	}
+
+	// Verify agent extracted cleanly with frontmatter stripped from body.
+	if len(ps.Agents) != 1 || ps.Agents[0].Name != "reviewer" || ps.Agents[0].Description != "Reviews PRs" || ps.Agents[0].Model != "sonnet" {
+		t.Fatalf("expected imported reviewer agent, got %+v", ps.Agents)
+	}
+	agentBody, _ := os.ReadFile(filepath.Join(proj, ".agentfile", "imported", "agents", "reviewer.md"))
+	if strings.Contains(string(agentBody), "---") || !strings.Contains(string(agentBody), "Review code for bugs.") {
+		t.Fatalf("expected clean normalized agent body in .agentfile/imported/agents/reviewer.md, got:\n%s", agentBody)
+	}
+
+	// Verify rules extracted cleanly (cursor style.mdc, windsurf sec.md, AGENTS.md architecture).
+	if len(ps.Rules) != 3 {
+		t.Fatalf("expected 3 imported rules (architecture, sec, style), got %+v", ps.Rules)
+	}
+	ruleByName := make(map[string]spec.RuleSpec)
+	for _, r := range ps.Rules {
+		ruleByName[r.Name] = r
+	}
+	if r, ok := ruleByName["style"]; !ok || r.Description != "Go style" || !slices.Equal(r.Globs, []string{"**/*.go"}) || r.AlwaysApply {
+		t.Fatalf("unexpected imported style rule: %+v", r)
+	}
+	if r, ok := ruleByName["sec"]; !ok || r.Description != "Security baseline" || !r.AlwaysApply {
+		t.Fatalf("unexpected imported sec rule: %+v", r)
+	}
+	if r, ok := ruleByName["architecture"]; !ok || r.Description != "Architectural invariants" || !slices.Equal(r.Globs, []string{"internal/**/*.go"}) {
+		t.Fatalf("unexpected imported architecture rule: %+v", r)
+	}
+	archBody, _ := os.ReadFile(filepath.Join(proj, ".agentfile", "imported", "rules", "architecture.md"))
+	if strings.Contains(string(archBody), "BEGIN AGENTFILE") || strings.Contains(string(archBody), "*Scope:*") || !strings.Contains(string(archBody), "Keep adapters I/O-free.") {
+		t.Fatalf("expected stripped clean rule body in .agentfile/imported/rules/architecture.md, got:\n%s", archBody)
+	}
+
+	// Verify permissions and hooks.
+	if !slices.Contains(ps.Settings.Permissions.AllowCommands, "go vet") || !slices.Contains(ps.Settings.Permissions.AllowCommands, "go test *") {
+		t.Fatalf("expected allow_commands imported, got %+v", ps.Settings.Permissions.AllowCommands)
+	}
+	if len(ps.Settings.Permissions.DenyCommands) != 1 || ps.Settings.Permissions.DenyCommands[0] != "rm -rf *" {
+		t.Fatalf("expected deduplicated deny_commands [rm -rf *], got %+v", ps.Settings.Permissions.DenyCommands)
+	}
+	if len(ps.Settings.Hooks["PreToolUse"]) != 1 || ps.Settings.Hooks["PreToolUse"][0].Command.Raw != "./scripts/guard.sh" {
+		t.Fatalf("expected imported PreToolUse hook, got %+v", ps.Settings.Hooks)
+	}
+
+	// Verify detected targets include claude, opencode, cursor, codex, copilot, windsurf.
+	for _, wantTgt := range []string{"claude", "opencode", "cursor", "codex", "copilot", "windsurf"} {
+		if !slices.Contains(ps.Targets, wantTgt) {
+			t.Fatalf("expected detected target %q in %v", wantTgt, ps.Targets)
+		}
+	}
+
+	// 4. Follow-up sync --link-mode=symlink --force and clean leave .agentfile/imported/ intact,
+	// and vcs.SyncExcludes keeps .agentfile/imported/ non-ignored while excluding .agentfile/state.json.
+	// Adjust targets_config on_unsupported: warn so multi-target sync succeeds cleanly with deny_commands/hooks.
+	for _, tgt := range []string{"opencode", "cursor", "codex", "copilot", "windsurf"} {
+		if ps.TargetsConfig == nil {
+			ps.TargetsConfig = make(map[string]spec.TargetConfigSpec)
+		}
+		// Keep test simple: overwrite manifest targets to [claude, codex] via init --import --force --targets claude,codex
+		_ = tgt
+	}
+	out.Reset()
+	errOut.Reset()
+	code = ExecuteWithIO([]string{"init", "--import", "--force", "--targets", "claude,codex"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false })
+	if code != 0 {
+		t.Fatalf("init --import --force --targets claude,codex failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	psMigrated, err := spec.ParseFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(psMigrated.Targets, []string{"claude", "codex"}) {
+		t.Fatalf("expected targets [claude codex], got %v", psMigrated.Targets)
+	}
+	// Cursor/Windsurf rules were still migrated even though targets is [claude, codex].
+	if len(psMigrated.Rules) != 3 {
+		t.Fatalf("expected Cursor/Windsurf rules migrated with --targets claude,codex, got %d", len(psMigrated.Rules))
+	}
+
+	// Add on_unsupported: warn for codex so sync with deny_commands/PreToolUse succeeds.
+	migratedBytes, _ := os.ReadFile(manifestPath)
+	migratedBytes = append(migratedBytes, []byte("\ntargets_config:\n  codex:\n    on_unsupported: warn\n")...)
+	_ = os.WriteFile(manifestPath, migratedBytes, 0o644)
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"sync", "--link-mode=symlink", "--force"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("sync --link-mode=symlink failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	// Verify .agentfile/state.json is ignored by git, while .agentfile/imported/ is NOT ignored!
+	checkIgnore := func(rel string) bool {
+		cmd := exec.Command("git", "check-ignore", "-q", rel)
+		cmd.Dir = proj
+		return cmd.Run() == nil
+	}
+	if !checkIgnore(".agentfile/state.json") {
+		t.Fatalf("expected .agentfile/state.json to be git-excluded")
+	}
+	if checkIgnore(".agentfile/imported/skills/auditor/SKILL.md") {
+		t.Fatalf("expected .agentfile/imported/ NOT to be git-excluded")
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"clean"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("clean failed (%d): %s", code, errOut.String())
+	}
+	for _, importedRel := range []string{
+		".agentfile/imported/skills/auditor/SKILL.md",
+		".agentfile/imported/agents/reviewer.md",
+		".agentfile/imported/rules/style.md",
+		".agentfile/imported/rules/sec.md",
+		".agentfile/imported/rules/architecture.md",
+	} {
+		if _, err := os.Stat(filepath.Join(proj, filepath.FromSlash(importedRel))); err != nil {
+			t.Fatalf("expected %s to remain intact after sync + clean: %v", importedRel, err)
+		}
+	}
+}
+
+func TestInitImportFailClosedAndEdgeCases(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	var out, errOut bytes.Buffer
+
+	// 1. Flag validation errors -> exit 2.
+	empty := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "--import", "--minimal"},
+		{"init", "--import", "--full"},
+		{"init", "--dry-run"},
+		{"init", "--json"},
+		{"init", "--import", "--targets", "unknown_tool"},
+	} {
+		out.Reset()
+		errOut.Reset()
+		if code := ExecuteWithIO(args, empty, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+			t.Fatalf("expected exit 2 for %v, got %d (err=%s)", args, code, errOut.String())
+		}
+	}
+
+	// 2. Empty repo (zero importable configs) -> exit 2.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"init", "--import"}, empty, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 on empty repo, got %d", code)
+	}
+
+	// 3. Existing Agentfile.yaml without --force -> exit 2.
+	existing := t.TempDir()
+	_ = os.WriteFile(filepath.Join(existing, "Agentfile.yaml"), []byte("version: 1\ntargets: [claude]\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(existing, ".mcp.json"), []byte(`{"mcpServers":{"fs":{"command":"npx"}}}`), 0o644)
+	if code := ExecuteWithIO([]string{"init", "--import"}, existing, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 when Agentfile.yaml exists without --force, got %d", code)
+	}
+
+	// 4. Literal secrets in MCP & hooks -> exit 2 without writing anything.
+	secretCases := []struct {
+		name      string
+		wantInErr []string
+		setup     func(dir string)
+	}{
+		{
+			name:      "ghp token in mcp env",
+			wantInErr: []string{".mcp.json", "mcp.gh.env.GH_TOKEN"},
+			setup: func(dir string) {
+				_ = os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(`{"mcpServers":{"gh":{"command":"npx","env":{"GH_TOKEN":"ghp_1234567890abcdef"}}}}`), 0o644)
+			},
+		},
+		{
+			name:      "Bearer rawtok in mcp headers",
+			wantInErr: []string{".mcp.json", "mcp.gh.headers.Authorization"},
+			setup: func(dir string) {
+				_ = os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(`{"mcpServers":{"gh":{"type":"http","url":"https://api.example.com","headers":{"Authorization":"Bearer rawtok"}}}}`), 0o644)
+			},
+		},
+		{
+			name:      "literal secret in hook command",
+			wantInErr: []string{".claude/settings.json", "hooks.PostToolUse"},
+			setup: func(dir string) {
+				_ = os.MkdirAll(filepath.Join(dir, ".claude"), 0o755)
+				_ = os.WriteFile(filepath.Join(dir, ".claude", "settings.json"), []byte(`{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"curl -H 'Authorization: Bearer rawtok' https://example.com"}]}]}}`), 0o644)
+			},
+		},
+	}
+	for _, tc := range secretCases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := t.TempDir()
+			tc.setup(d)
+			out.Reset()
+			errOut.Reset()
+			if code := ExecuteWithIO([]string{"init", "--import"}, d, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+				t.Fatalf("expected exit 2 for %s, got %d (out=%s err=%s)", tc.name, code, out.String(), errOut.String())
+			}
+			for _, want := range tc.wantInErr {
+				if !strings.Contains(errOut.String(), want) {
+					t.Fatalf("expected %q in error for %s, got: %s", want, tc.name, errOut.String())
+				}
+			}
+			if _, err := os.Stat(filepath.Join(d, "Agentfile.yaml")); !os.IsNotExist(err) {
+				t.Fatalf("must not write Agentfile.yaml on secret rejection")
+			}
+		})
+	}
+
+	// 5. Divergent MCP definition across tools -> exit 2.
+	divMCP := t.TempDir()
+	_ = os.WriteFile(filepath.Join(divMCP, ".mcp.json"), []byte(`{"mcpServers":{"gh":{"type":"http","url":"https://a.example.com"}}}`), 0o644)
+	_ = os.WriteFile(filepath.Join(divMCP, "opencode.json"), []byte(`{"mcp":{"gh":{"type":"remote","url":"https://b.example.com"}}}`), 0o644)
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"init", "--import"}, divMCP, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 on divergent MCP definition, got %d (%s)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), ".mcp.json") || !strings.Contains(errOut.String(), "opencode.json") {
+		t.Fatalf("expected conflicting file paths in MCP error: %s", errOut.String())
+	}
+
+	// 6. Divergent skill definition across tools -> exit 2.
+	divSkill := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(divSkill, ".claude", "skills", "auditor"), 0o755)
+	_ = os.WriteFile(filepath.Join(divSkill, ".claude", "skills", "auditor", "SKILL.md"), []byte("v1\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(divSkill, ".agents", "skills", "auditor"), 0o755)
+	_ = os.WriteFile(filepath.Join(divSkill, ".agents", "skills", "auditor", "SKILL.md"), []byte("v2\n"), 0o644)
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"init", "--import"}, divSkill, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 on divergent skill definition, got %d (%s)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), ".claude/skills/auditor") || !strings.Contains(errOut.String(), ".agents/skills/auditor") {
+		t.Fatalf("expected conflicting skill paths in error: %s", errOut.String())
+	}
+
+	// 7. Divergent rule & agent definitions across tools -> exit 2.
+	divRule := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(divRule, ".claude", "rules"), 0o755)
+	_ = os.WriteFile(filepath.Join(divRule, ".claude", "rules", "agentfile-style.md"), []byte("Rule v1.\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(divRule, ".cursor", "rules"), 0o755)
+	_ = os.WriteFile(filepath.Join(divRule, ".cursor", "rules", "agentfile-style.mdc"), []byte("---\nalwaysApply: false\n---\n\nRule v2.\n"), 0o644)
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"init", "--import"}, divRule, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 on divergent rule definition, got %d (%s)", code, errOut.String())
+	}
+
+	divAgent := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(divAgent, ".claude", "agents"), 0o755)
+	_ = os.WriteFile(filepath.Join(divAgent, ".claude", "agents", "rev.md"), []byte("v1\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(divAgent, ".opencode", "agents"), 0o755)
+	_ = os.WriteFile(filepath.Join(divAgent, ".opencode", "agents", "rev.md"), []byte("v2\n"), 0o644)
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"init", "--import"}, divAgent, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 on divergent agent definition, got %d (%s)", code, errOut.String())
+	}
+}
+
+func TestInitImportGeminiCursorOpenCodeRulesAndUnstructuredFallbacks(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	proj := t.TempDir()
+
+	// Gemini httpUrl + Cursor mcpServers + identical deduplication.
+	_ = os.MkdirAll(filepath.Join(proj, ".gemini"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".gemini", "settings.json"), []byte(`{
+  "mcpServers": {
+    "linear": {
+      "httpUrl": "https://mcp.linear.app/mcp",
+      "headers": { "Authorization": "Bearer ${LINEAR_PAT}" }
+    }
+  }
+}`), 0o644)
+
+	_ = os.MkdirAll(filepath.Join(proj, ".cursor"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".cursor", "mcp.json"), []byte(`{
+  "mcpServers": {
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "headers": { "Authorization": "Bearer ${env:LINEAR_PAT}" }
+    }
+  }
+}`), 0o644)
+
+	// .claude/rules/agentfile-coding.md (strips agentfile- prefix, maps paths -> globs).
+	_ = os.MkdirAll(filepath.Join(proj, ".claude", "rules"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".claude", "rules", "agentfile-coding.md"), []byte("---\npaths:\n  - \"**/*.go\"\n---\n\nWrite unit tests.\n"), 0o644)
+
+	// .opencode/agentfile-rules.md with ## coding (matching .claude/rules/agentfile-coding.md if Scope absent) + ## Go Code Style! (sanitized slug).
+	_ = os.MkdirAll(filepath.Join(proj, ".opencode"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".opencode", "agentfile-rules.md"), []byte(`# Project Agent Instructions (Managed by agentfile)
+
+## coding
+
+*Applies to:* `+"`**/*.go`"+`
+
+Write unit tests.
+
+---
+
+## Go Code Style!
+
+Keep functions small.
+`), 0o644)
+
+	// Unstructured GEMINI.md and .github/copilot-instructions.md -> tool-derived fallback slugs.
+	_ = os.WriteFile(filepath.Join(proj, "GEMINI.md"), []byte("Be concise with Gemini.\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(proj, ".github"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, ".github", "copilot-instructions.md"), []byte("Use idiomatic Go for Copilot.\n"), 0o644)
+
+	// Escaping rule symlink must be ignored.
+	outside := t.TempDir()
+	_ = os.WriteFile(filepath.Join(outside, "leak.md"), []byte("secret"), 0o644)
+	_ = os.Symlink(filepath.Join(outside, "leak.md"), filepath.Join(proj, ".claude", "rules", "leak.md"))
+
+	var out, errOut bytes.Buffer
+	code := ExecuteWithIO([]string{"init", "--import", "--json"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false })
+	if code != 0 {
+		t.Fatalf("init --import --json failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	var sum ImportSummary
+	if err := json.Unmarshal(out.Bytes(), &sum); err != nil {
+		t.Fatalf("invalid ImportSummary JSON: %v\n%s", err, out.String())
+	}
+	for _, wantTgt := range []string{"claude", "opencode", "gemini", "cursor", "copilot"} {
+		if !slices.Contains(sum.Targets, wantTgt) {
+			t.Fatalf("expected target %q in %v", wantTgt, sum.Targets)
+		}
+	}
+	for _, wantRule := range []string{"coding", "go-code-style", "gemini-instructions", "copilot-instructions"} {
+		if !slices.Contains(sum.Rules, wantRule) {
+			t.Fatalf("expected rule %q in %v", wantRule, sum.Rules)
+		}
+	}
+	if slices.Contains(sum.Rules, "leak") {
+		t.Fatalf("escaping symlink rule should have been ignored, got %v", sum.Rules)
+	}
+	if _, err := spec.ParseFile(filepath.Join(proj, "Agentfile.yaml")); err != nil {
+		t.Fatalf("generated Agentfile.yaml invalid: %v", err)
 	}
 }
