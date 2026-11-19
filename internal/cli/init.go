@@ -61,6 +61,9 @@ func detectTargetsOnPath() []string {
 		{"opencode", "opencode"},
 		{"gemini", "gemini"},
 		{"cursor", "cursor"},
+		{"codex", "codex"},
+		{"copilot", "copilot"},
+		{"windsurf", "windsurf"},
 	}
 	var found []string
 	for _, c := range candidates {

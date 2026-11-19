@@ -6,18 +6,24 @@ import (
 
 	"github.com/bettertux007/agentfile/internal/adapters"
 	"github.com/bettertux007/agentfile/internal/adapters/claude"
+	"github.com/bettertux007/agentfile/internal/adapters/codex"
+	"github.com/bettertux007/agentfile/internal/adapters/copilot"
 	"github.com/bettertux007/agentfile/internal/adapters/cursor"
 	"github.com/bettertux007/agentfile/internal/adapters/gemini"
 	"github.com/bettertux007/agentfile/internal/adapters/opencode"
+	"github.com/bettertux007/agentfile/internal/adapters/windsurf"
 )
 
-// Default returns the full Milestone 2 adapter registry (claude, opencode, gemini, cursor).
+// Default returns the full 7-target adapter registry (claude, opencode, gemini, cursor, codex, copilot, windsurf).
 func Default() map[string]adapters.Adapter {
 	list := []adapters.Adapter{
 		claude.New(),
 		opencode.New(),
 		gemini.New(),
 		cursor.New(),
+		codex.New(),
+		copilot.New(),
+		windsurf.New(),
 	}
 	out := make(map[string]adapters.Adapter, len(list))
 	for _, a := range list {

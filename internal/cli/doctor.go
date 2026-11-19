@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strings"
 
 	"github.com/bettertux007/agentfile/internal/adapters"
 	"github.com/bettertux007/agentfile/internal/adapters/registry"
@@ -15,6 +16,7 @@ import (
 	"github.com/bettertux007/agentfile/internal/runner"
 	"github.com/bettertux007/agentfile/internal/spec"
 	"github.com/bettertux007/agentfile/internal/store"
+	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"github.com/tailscale/hujson"
 )
@@ -250,15 +252,25 @@ func checkGlobalMCPFile(full, jsonKey string, ps *spec.ProjectSpec) ([]GlobalCon
 	if err != nil {
 		return nil, nil
 	}
-	std, err := hujson.Standardize(raw)
-	if err != nil {
-		return nil, nil
-	}
 	var doc map[string]any
-	if err := json.Unmarshal(std, &doc); err != nil {
-		return nil, nil
+	key := jsonKey
+	if strings.HasSuffix(strings.ToLower(full), ".toml") {
+		if err := toml.Unmarshal(raw, &doc); err != nil {
+			return nil, nil
+		}
+		if key == "" {
+			key = "mcp_servers"
+		}
+	} else {
+		std, err := hujson.Standardize(raw)
+		if err != nil {
+			return nil, nil
+		}
+		if err := json.Unmarshal(std, &doc); err != nil {
+			return nil, nil
+		}
 	}
-	sub, ok := doc[jsonKey].(map[string]any)
+	sub, ok := doc[key].(map[string]any)
 	if !ok {
 		return nil, nil
 	}

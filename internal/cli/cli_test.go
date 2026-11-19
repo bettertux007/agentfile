@@ -2213,3 +2213,93 @@ func TestStatusSharedArtifactAttributionAndVerifyOnDisk(t *testing.T) {
 		}
 	}
 }
+
+func TestDoctorTOMLGlobalMCPShadowingAndInitDetection(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	// 1. Seed global ~/.codex/config.toml with a shadowing [mcp_servers.github] entry.
+	_ = os.MkdirAll(filepath.Join(homeDir, ".codex"), 0o755)
+	_ = os.WriteFile(filepath.Join(homeDir, ".codex", "config.toml"), []byte("[mcp_servers.github]\nurl = \"https://example.com/mcp\"\n"), 0o644)
+
+	// Stub codex, copilot, and windsurf on isolated PATH to test init detection.
+	binDir := t.TempDir()
+	for _, bin := range []string{"codex", "copilot", "windsurf"} {
+		_ = os.WriteFile(filepath.Join(binDir, bin), []byte("#!/bin/sh\necho '"+bin+" 1.0.0'\n"), 0o755)
+	}
+	t.Setenv("PATH", binDir)
+
+	proj := t.TempDir()
+	var out, errOut bytes.Buffer
+	if code := ExecuteWithIO([]string{"init", "--minimal"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("init failed (%d): %s", code, errOut.String())
+	}
+	initManifest, _ := os.ReadFile(filepath.Join(proj, "Agentfile.yaml"))
+	for _, tgt := range []string{"codex", "copilot", "windsurf"} {
+		if !strings.Contains(string(initManifest), "- "+tgt) {
+			t.Fatalf("expected detected target %q in Agentfile.yaml:\n%s", tgt, initManifest)
+		}
+	}
+
+	// 2. Write manifest declaring codex, copilot, windsurf + github MCP and verify doctor catches TOML shadowing.
+	_ = os.MkdirAll(filepath.Join(proj, "skills", "k8s"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "skills", "k8s", "SKILL.md"), []byte("# K8s\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(proj, "docs"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "docs", "RULES.md"), []byte("Run tests.\n"), 0o644)
+
+	manifest := `version: 1
+targets: [codex, copilot, windsurf]
+mcp:
+  github:
+    transport: http
+    url: "https://api.example.com/mcp"
+skills:
+  - name: k8s
+    source: ./skills/k8s
+rules:
+  - name: style
+    source: ./docs/RULES.md
+    globs: ["**/*.go"]
+targets_config:
+  copilot:
+    rules_mode: agents_md
+  windsurf:
+    rules_mode: agents_md
+`
+	_ = os.WriteFile(filepath.Join(proj, "Agentfile.yaml"), []byte(manifest), 0o644)
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("3-target sync failed (%d): %s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".codex", "config.toml")); err != nil {
+		t.Fatalf("expected .codex/config.toml: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".vscode", "mcp.json")); err != nil {
+		t.Fatalf("expected .vscode/mcp.json: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(proj, "AGENTS.md")); err != nil {
+		t.Fatalf("expected shared AGENTS.md: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".agents", "skills", "k8s", "SKILL.md")); err != nil {
+		t.Fatalf("expected shared .agents/skills/k8s/SKILL.md: %v", err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"doctor", "--json"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("doctor --json failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	var docRep DoctorReport
+	if err := json.Unmarshal(out.Bytes(), &docRep); err != nil {
+		t.Fatalf("invalid doctor JSON: %v\n%s", err, out.String())
+	}
+	if len(docRep.GlobalConflicts) != 1 || docRep.GlobalConflicts[0].ServerName != "github" || !strings.HasSuffix(docRep.GlobalConflicts[0].GlobalFile, filepath.Join(".codex", "config.toml")) {
+		t.Fatalf("expected global TOML MCP conflict for github in .codex/config.toml, got %+v", docRep.GlobalConflicts)
+	}
+}

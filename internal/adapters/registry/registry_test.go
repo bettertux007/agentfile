@@ -9,7 +9,7 @@ func TestRegistryDefaultLookupAndNames(t *testing.T) {
 	t.Parallel()
 	reg := Default()
 	names := Names(reg)
-	want := []string{"claude", "cursor", "gemini", "opencode"}
+	want := []string{"claude", "codex", "copilot", "cursor", "gemini", "opencode", "windsurf"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("unexpected registered targets: got %v, want %v", names, want)
 	}
