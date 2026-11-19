@@ -10,7 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bettertux007/agentfile/internal/adapters"
+	"github.com/bettertux007/agentfile/internal/config"
 	"github.com/bettertux007/agentfile/internal/diff"
+	"github.com/bettertux007/agentfile/internal/engine"
 	"github.com/bettertux007/agentfile/internal/runner"
 )
 
@@ -2077,4 +2080,136 @@ func TestDiffRendererSingleChunkTruncation(t *testing.T) {
 			t.Fatalf("expected 1 truncation notice, got %d", strings.Count(got, truncNotice))
 		}
 	})
+}
+
+func TestStatusSharedArtifactAttributionAndVerifyOnDisk(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_ALLOW_FILE_GIT", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "skill-src")
+	_ = os.MkdirAll(skillDir, 0o755)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Auditor\n"), 0o644)
+
+	cfg := &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail", GitExclude: false}
+	sharedOps := []*adapters.CompileResult{
+		{
+			Target: "claude",
+			Files: []adapters.ArtifactOp{
+				{Target: "claude", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("Shared rule")},
+				{Target: "claude", RelPath: ".agents/skills/auditor", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir},
+			},
+		},
+		{
+			Target: "cursor",
+			Files: []adapters.ArtifactOp{
+				{Target: "cursor", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("Shared rule")},
+				{Target: "cursor", RelPath: ".agents/skills/auditor", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir},
+			},
+		},
+	}
+
+	// 1. Pre-existing unmanaged .agents/skills/auditor causes shared conflict attributed to both claude & cursor.
+	unmanaged := filepath.Join(dir, ".agents", "skills", "auditor")
+	_ = os.MkdirAll(unmanaged, 0o755)
+	_ = os.WriteFile(filepath.Join(unmanaged, "SKILL.md"), []byte("user"), 0o644)
+
+	planConf, err := engine.BuildPlan(engine.PlanInput{
+		ProjectRoot:      dir,
+		ActiveTargets:    []string{"claude", "cursor"},
+		Config:           cfg,
+		CompiledResults:  sharedOps,
+		InspectConflicts: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reports := []StatusTargetReport{
+		{Target: "claude", Status: "not_synced"},
+		{Target: "cursor", Status: "not_synced"},
+	}
+	applyPlanToTargetReports(reports, []string{"claude", "cursor"}, planConf, &engine.State{Version: engine.StateVersion, Targets: map[string]*engine.TargetState{}}, false, false)
+	for _, r := range reports {
+		if r.Status != "conflict" || len(r.Conflicts) != 1 || r.Conflicts[0].Target != "shared" {
+			t.Fatalf("expected shared conflict attributed to %s, got %+v", r.Target, r)
+		}
+		if !slices.Contains(r.DriftedPaths, "AGENTS.md") {
+			t.Fatalf("expected shared Action AGENTS.md attributed as drift for %s, got %+v", r.Target, r.DriftedPaths)
+		}
+	}
+
+	// 2. Sync with overwrite, verify collectStatePaths includes Shared, and status attribution is in_sync.
+	_ = os.RemoveAll(unmanaged)
+	planSync, err := engine.BuildPlan(engine.PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"claude", "cursor"},
+		Config:          cfg,
+		CompiledResults: sharedOps,
+	})
+	if err != nil || engine.Commit(planSync) != nil {
+		t.Fatalf("sync commit failed: %v", err)
+	}
+	st, err := engine.LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePaths := collectStatePaths(st)
+	if !slices.Contains(statePaths, "AGENTS.md") || !slices.Contains(statePaths, ".agents/skills/auditor") {
+		t.Fatalf("expected collectStatePaths to include Shared paths, got %v", statePaths)
+	}
+
+	planClean, err := engine.BuildPlan(engine.PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"claude", "cursor"},
+		Config:          cfg,
+		CompiledResults: sharedOps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportsClean := []StatusTargetReport{
+		{Target: "claude", Status: "not_synced"},
+		{Target: "cursor", Status: "not_synced"},
+	}
+	applyPlanToTargetReports(reportsClean, []string{"claude", "cursor"}, planClean, st, true, false)
+	for _, r := range reportsClean {
+		if r.Status != "in_sync" || len(r.DriftedPaths) != 0 {
+			t.Fatalf("expected in_sync for %s, got %+v", r.Target, r)
+		}
+	}
+
+	// 3. Shared PruneOps (both targets stop emitting) attributes drift to both claude and cursor.
+	planPrune, err := engine.BuildPlan(engine.PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"claude", "cursor"},
+		Config:        cfg,
+		CompiledResults: []*adapters.CompileResult{
+			{Target: "claude", Files: nil},
+			{Target: "cursor", Files: nil},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportsPrune := []StatusTargetReport{
+		{Target: "claude", Status: "not_synced"},
+		{Target: "cursor", Status: "not_synced"},
+	}
+	applyPlanToTargetReports(reportsPrune, []string{"claude", "cursor"}, planPrune, st, true, false)
+	for _, r := range reportsPrune {
+		if r.Status != "drifted" || !slices.Contains(r.DriftedPaths, "AGENTS.md") || !slices.Contains(r.DriftedPaths, ".agents/skills/auditor") {
+			t.Fatalf("expected shared PruneOps drift for %s, got %+v", r.Target, r)
+		}
+	}
+
+	// 4.verifyTargetStateOnDisk detects shared disk drift for every owning target (including unhydrated status path).
+	_ = os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("tampered\n"), 0o644)
+	for _, tgt := range []string{"claude", "cursor"} {
+		dpaths := verifyTargetStateOnDisk(dir, st, tgt)
+		if !slices.Contains(dpaths, "AGENTS.md") {
+			t.Fatalf("expected verifyTargetStateOnDisk(%s) to detect tampered shared AGENTS.md, got %v", tgt, dpaths)
+		}
+	}
 }

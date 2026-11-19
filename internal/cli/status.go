@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -175,60 +176,7 @@ func newStatusCmd(ec *execContext) *cobra.Command {
 						rep.Drifted = drifted
 						rep.DriftReason = driftReason
 
-						driftedByTarget := make(map[string]map[string]bool, len(validTargets))
-						for _, t := range validTargets {
-							driftedByTarget[t] = make(map[string]bool)
-						}
-						for _, a := range plan.Actions {
-							if driftedByTarget[a.Target] != nil {
-								driftedByTarget[a.Target][a.RelPath] = true
-							}
-						}
-						for _, p := range plan.PruneOps {
-							if driftedByTarget[p.Target] != nil {
-								driftedByTarget[p.Target][p.RelPath] = true
-							}
-						}
-						conflictsByTarget := make(map[string][]engine.PlanConflict, len(validTargets))
-						for _, c := range plan.Conflicts {
-							conflictsByTarget[c.Target] = append(conflictsByTarget[c.Target], c)
-						}
-
-						excludeMismatch := plan.NextState != nil && (prevState == nil || prevState.ExcludeFingerprint != plan.NextState.ExcludeFingerprint)
-						gitExcludeToggled := excludeMismatch && stringSlicesEqual(collectStatePaths(prevState), plan.AllExcludePath)
-						for i := range targetReports {
-							t := targetReports[i].Target
-							var dpaths []string
-							for p := range driftedByTarget[t] {
-								dpaths = append(dpaths, p)
-							}
-							sort.Strings(dpaths)
-							targetReports[i].DriftedPaths = dpaths
-							targetReports[i].Conflicts = conflictsByTarget[t]
-
-							targetSynced := stateExists && prevState != nil && prevState.Targets[t] != nil
-							targetStateDrifted := false
-							if targetSynced {
-								var nextTargetState *engine.TargetState
-								if plan.NextState != nil {
-									nextTargetState = plan.NextState.Targets[t]
-								}
-								targetStateDrifted = !engine.StatesEqual(
-									&engine.State{Version: engine.StateVersion, Targets: map[string]*engine.TargetState{t: prevState.Targets[t]}},
-									&engine.State{Version: engine.StateVersion, Targets: map[string]*engine.TargetState{t: nextTargetState}},
-								)
-							}
-							switch {
-							case len(conflictsByTarget[t]) > 0:
-								targetReports[i].Status = "conflict"
-							case !targetSynced:
-								targetReports[i].Status = "not_synced"
-							case len(dpaths) > 0 || rep.CommitJournalPending || targetStateDrifted || gitExcludeToggled:
-								targetReports[i].Status = "drifted"
-							default:
-								targetReports[i].Status = "in_sync"
-							}
-						}
+						applyPlanToTargetReports(targetReports, validTargets, plan, prevState, stateExists, rep.CommitJournalPending)
 					}
 				} else {
 					// Never invoke ir.Build or engine.BuildPlan when dependencies are unhydrated or missing.
@@ -240,7 +188,7 @@ func newStatusCmd(ec *execContext) *cobra.Command {
 						if len(dpaths) > 0 {
 							anyTargetDrifted = true
 						}
-						targetSynced := stateExists && prevState != nil && prevState.Targets[t] != nil
+						targetSynced := stateExists && prevState != nil && (prevState.Targets[t] != nil || targetHasShared(prevState, t))
 						switch {
 						case len(rep.UnhydratedDeps) > 0:
 							targetReports[i].Status = "unhydrated"
@@ -370,23 +318,166 @@ func buildInspectionPlan(
 	})
 }
 
+func applyPlanToTargetReports(
+	targetReports []StatusTargetReport,
+	validTargets []string,
+	plan *engine.Plan,
+	prevState *engine.State,
+	stateExists bool,
+	commitJournalPending bool,
+) {
+	driftedByTarget := make(map[string]map[string]bool, len(validTargets))
+	for _, t := range validTargets {
+		driftedByTarget[t] = make(map[string]bool)
+	}
+	for _, a := range plan.Actions {
+		if a.Target == "shared" {
+			if plan.NextState != nil {
+				if sar, ok := plan.NextState.Shared[a.RelPath]; ok {
+					for _, owner := range sar.Owners {
+						if driftedByTarget[owner] != nil {
+							driftedByTarget[owner][a.RelPath] = true
+						}
+					}
+				}
+			}
+			continue
+		}
+		if driftedByTarget[a.Target] != nil {
+			driftedByTarget[a.Target][a.RelPath] = true
+		}
+	}
+	for _, p := range plan.PruneOps {
+		if p.Target == "shared" {
+			if prevState != nil {
+				if sar, ok := prevState.Shared[p.RelPath]; ok {
+					for _, owner := range sar.Owners {
+						if driftedByTarget[owner] != nil {
+							driftedByTarget[owner][p.RelPath] = true
+						}
+					}
+				}
+			}
+			continue
+		}
+		if driftedByTarget[p.Target] != nil {
+			driftedByTarget[p.Target][p.RelPath] = true
+		}
+	}
+	conflictsByTarget := make(map[string][]engine.PlanConflict, len(validTargets))
+	for _, c := range plan.Conflicts {
+		if c.Target == "shared" {
+			for _, owner := range c.Owners {
+				conflictsByTarget[owner] = append(conflictsByTarget[owner], c)
+			}
+			continue
+		}
+		conflictsByTarget[c.Target] = append(conflictsByTarget[c.Target], c)
+	}
+
+	excludeMismatch := plan.NextState != nil && (prevState == nil || prevState.ExcludeFingerprint != plan.NextState.ExcludeFingerprint)
+	gitExcludeToggled := excludeMismatch && stringSlicesEqual(collectStatePaths(prevState), plan.AllExcludePath)
+	for i := range targetReports {
+		t := targetReports[i].Target
+		var dpaths []string
+		for p := range driftedByTarget[t] {
+			dpaths = append(dpaths, p)
+		}
+		sort.Strings(dpaths)
+		targetReports[i].DriftedPaths = dpaths
+		targetReports[i].Conflicts = conflictsByTarget[t]
+
+		targetSynced := stateExists && prevState != nil && (prevState.Targets[t] != nil || targetHasShared(prevState, t))
+		targetStateDrifted := false
+		if targetSynced {
+			var nextTargetState *engine.TargetState
+			if plan.NextState != nil {
+				nextTargetState = plan.NextState.Targets[t]
+			}
+			targetStateDrifted = !engine.StatesEqual(
+				&engine.State{
+					Version: engine.StateVersion,
+					Targets: map[string]*engine.TargetState{t: prevState.Targets[t]},
+					Shared:  sharedRecordsForTarget(prevState, t),
+				},
+				&engine.State{
+					Version: engine.StateVersion,
+					Targets: map[string]*engine.TargetState{t: nextTargetState},
+					Shared:  sharedRecordsForTarget(plan.NextState, t),
+				},
+			)
+		}
+		switch {
+		case len(conflictsByTarget[t]) > 0:
+			targetReports[i].Status = "conflict"
+		case !targetSynced:
+			targetReports[i].Status = "not_synced"
+		case len(dpaths) > 0 || commitJournalPending || targetStateDrifted || gitExcludeToggled:
+			targetReports[i].Status = "drifted"
+		default:
+			targetReports[i].Status = "in_sync"
+		}
+	}
+}
+
+func targetHasShared(st *engine.State, target string) bool {
+	if st == nil {
+		return false
+	}
+	for _, sar := range st.Shared {
+		if slices.Contains(sar.Owners, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func sharedRecordsForTarget(st *engine.State, target string) map[string]engine.SharedArtifactRecord {
+	if st == nil || len(st.Shared) == 0 {
+		return nil
+	}
+	var out map[string]engine.SharedArtifactRecord
+	for rel, sar := range st.Shared {
+		if slices.Contains(sar.Owners, target) {
+			if out == nil {
+				out = make(map[string]engine.SharedArtifactRecord)
+			}
+			out[rel] = engine.SharedArtifactRecord{
+				Record: sar.Record,
+				Owners: []string{target},
+			}
+		}
+	}
+	return out
+}
+
 func verifyTargetStateOnDisk(projectRoot string, st *engine.State, target string) []string {
 	if st == nil {
 		return nil
 	}
-	ts := st.Targets[target]
-	if ts == nil || len(ts.Artifacts) == 0 {
+	recordsByPath := make(map[string]engine.ArtifactRecord)
+	if ts := st.Targets[target]; ts != nil {
+		for p, rec := range ts.Artifacts {
+			recordsByPath[p] = rec
+		}
+	}
+	for p, sar := range st.Shared {
+		if slices.Contains(sar.Owners, target) {
+			recordsByPath[p] = sar.Record
+		}
+	}
+	if len(recordsByPath) == 0 {
 		return nil
 	}
-	paths := make([]string, 0, len(ts.Artifacts))
-	for p := range ts.Artifacts {
+	paths := make([]string, 0, len(recordsByPath))
+	for p := range recordsByPath {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
 
 	var drifted []string
 	for _, rel := range paths {
-		rec := ts.Artifacts[rel]
+		rec := recordsByPath[rel]
 		abs := filepath.Join(projectRoot, filepath.FromSlash(rel))
 		info, err := os.Lstat(abs)
 		if err != nil {
@@ -446,6 +537,9 @@ func collectStatePaths(st *engine.State) []string {
 		for rel := range ts.Artifacts {
 			seen[rel] = true
 		}
+	}
+	for rel := range st.Shared {
+		seen[rel] = true
 	}
 	out := make([]string, 0, len(seen))
 	for rel := range seen {

@@ -246,17 +246,9 @@ func CommitWithDeps(plan *Plan, deps FSDeps) error {
 			if ts == nil {
 				continue
 			}
-			keptDirs := ts.OwnedDirs[:0]
-			for _, d := range ts.OwnedDirs {
-				absDir := filepath.Join(plan.ProjectRoot, filepath.FromSlash(d))
-				if removed := removeIfEffectivelyEmpty(absDir); !removed {
-					if _, err := os.Stat(absDir); err == nil {
-						keptDirs = append(keptDirs, d)
-					}
-				}
-			}
-			ts.OwnedDirs = keptDirs
+			ts.OwnedDirs = pruneEmptyOwnedDirs(plan.ProjectRoot, ts.OwnedDirs)
 		}
+		plan.NextState.SharedOwnedDirs = pruneEmptyOwnedDirs(plan.ProjectRoot, plan.NextState.SharedOwnedDirs)
 
 		for _, sw := range sidecars {
 			abs := filepath.Join(plan.ProjectRoot, filepath.FromSlash(sw.RelPath))
@@ -325,6 +317,11 @@ func Clean(projectRoot string, targets []string, dryRun bool) (*PlanSummary, err
 		for t := range st.Targets {
 			targetSet[t] = true
 		}
+		for _, sar := range st.Shared {
+			for _, owner := range sar.Owners {
+				targetSet[owner] = true
+			}
+		}
 	} else {
 		for _, t := range targets {
 			targetSet[t] = true
@@ -350,55 +347,8 @@ func Clean(projectRoot string, targets []string, dryRun bool) (*PlanSummary, err
 		sort.Strings(paths)
 
 		for _, rel := range paths {
-			rec := ts.Artifacts[rel]
-			abs := filepath.Join(projectRoot, filepath.FromSlash(rel))
-			if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-
-			if rec.ArtifactType == TypeJSONCPatch {
-				curBytes, err := os.ReadFile(abs)
-				if err == nil {
-					updatedBytes, deleteFile, rerr := RemoveJSONC(curBytes, rec)
-					if rerr != nil {
-						return nil, rerr
-					}
-					if !deleteFile {
-						summary.Updated = append(summary.Updated, rel)
-						if !dryRun {
-							if err := writeFileAtomic(abs, updatedBytes, 0o644); err != nil {
-								return nil, err
-							}
-						}
-						continue
-					}
-				}
-			}
-
-			if rec.ArtifactType == TypeMarkdownBlock {
-				curBytes, err := os.ReadFile(abs)
-				if err == nil {
-					updatedBytes, deleteFile, rerr := RemoveMarkdownBlock(curBytes, rec)
-					if rerr != nil {
-						return nil, rerr
-					}
-					if !deleteFile {
-						summary.Updated = append(summary.Updated, rel)
-						if !dryRun {
-							if err := writeFileAtomic(abs, updatedBytes, 0o644); err != nil {
-								return nil, err
-							}
-						}
-						continue
-					}
-				}
-			}
-
-			summary.Pruned = append(summary.Pruned, rel)
-			if !dryRun {
-				if err := os.RemoveAll(abs); err != nil {
-					return nil, err
-				}
+			if err := cleanTrackedArtifact(projectRoot, rel, ts.Artifacts[rel], dryRun, summary); err != nil {
+				return nil, err
 			}
 		}
 
@@ -410,8 +360,48 @@ func Clean(projectRoot string, targets []string, dryRun bool) (*PlanSummary, err
 		}
 	}
 
+	sharedPaths := make([]string, 0, len(st.Shared))
+	for rel := range st.Shared {
+		sharedPaths = append(sharedPaths, rel)
+	}
+	sort.Strings(sharedPaths)
+
+	prunedAnyShared := false
+	for _, rel := range sharedPaths {
+		sar := st.Shared[rel]
+		remainingOwners := make([]string, 0, len(sar.Owners))
+		removedAny := false
+		for _, owner := range sar.Owners {
+			if targetSet[owner] {
+				removedAny = true
+				continue
+			}
+			remainingOwners = append(remainingOwners, owner)
+		}
+		if !removedAny {
+			continue
+		}
+		if len(remainingOwners) > 0 {
+			if !dryRun {
+				sar.Owners = remainingOwners
+				st.Shared[rel] = sar
+			}
+			continue
+		}
+		prunedAnyShared = true
+		if err := cleanTrackedArtifact(projectRoot, rel, sar.Record, dryRun, summary); err != nil {
+			return nil, err
+		}
+		if !dryRun {
+			delete(st.Shared, rel)
+		}
+	}
+
 	if !dryRun {
-		if len(st.Targets) == 0 {
+		if prunedAnyShared {
+			st.SharedOwnedDirs = pruneEmptyOwnedDirs(projectRoot, st.SharedOwnedDirs)
+		}
+		if len(st.Targets) == 0 && len(st.Shared) == 0 {
 			_ = os.Remove(StatePath(projectRoot))
 			w, err := vcs.ClearExcludes(projectRoot)
 			if err != nil {
@@ -422,12 +412,20 @@ func Clean(projectRoot string, targets []string, dryRun bool) (*PlanSummary, err
 			if err := SaveState(projectRoot, st); err != nil {
 				return nil, err
 			}
-			var remaining []string
+			remainingSet := make(map[string]bool)
 			for _, ts := range st.Targets {
 				for rel := range ts.Artifacts {
-					remaining = append(remaining, rel)
+					remainingSet[rel] = true
 				}
 			}
+			for rel := range st.Shared {
+				remainingSet[rel] = true
+			}
+			remaining := make([]string, 0, len(remainingSet))
+			for rel := range remainingSet {
+				remaining = append(remaining, rel)
+			}
+			sort.Strings(remaining)
 			w, err := vcs.SyncExcludes(projectRoot, remaining, true)
 			if err != nil {
 				return nil, err
@@ -437,6 +435,72 @@ func Clean(projectRoot string, targets []string, dryRun bool) (*PlanSummary, err
 	}
 
 	return summary, nil
+}
+
+func cleanTrackedArtifact(projectRoot, rel string, rec ArtifactRecord, dryRun bool, summary *PlanSummary) error {
+	abs := filepath.Join(projectRoot, filepath.FromSlash(rel))
+	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	if rec.ArtifactType == TypeJSONCPatch {
+		curBytes, err := os.ReadFile(abs)
+		if err == nil {
+			updatedBytes, deleteFile, rerr := RemoveJSONC(curBytes, rec)
+			if rerr != nil {
+				return rerr
+			}
+			if !deleteFile {
+				summary.Updated = append(summary.Updated, rel)
+				if !dryRun {
+					if err := writeFileAtomic(abs, updatedBytes, 0o644); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+		}
+	}
+
+	if rec.ArtifactType == TypeMarkdownBlock {
+		curBytes, err := os.ReadFile(abs)
+		if err == nil {
+			updatedBytes, deleteFile, rerr := RemoveMarkdownBlock(curBytes, rec)
+			if rerr != nil {
+				return rerr
+			}
+			if !deleteFile {
+				summary.Updated = append(summary.Updated, rel)
+				if !dryRun {
+					if err := writeFileAtomic(abs, updatedBytes, 0o644); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+		}
+	}
+
+	summary.Pruned = append(summary.Pruned, rel)
+	if !dryRun {
+		if err := os.RemoveAll(abs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func pruneEmptyOwnedDirs(projectRoot string, dirs []string) []string {
+	keptDirs := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		absDir := filepath.Join(projectRoot, filepath.FromSlash(d))
+		if removed := removeIfEffectivelyEmpty(absDir); !removed {
+			if _, err := os.Stat(absDir); err == nil {
+				keptDirs = append(keptDirs, d)
+			}
+		}
+	}
+	return keptDirs
 }
 
 func rollbackJournal(projectRoot string, j *CommitJournal, deps FSDeps) error {
@@ -653,84 +717,4 @@ func removeIfEffectivelyEmpty(dir string) bool {
 		_ = os.Remove(filepath.Join(dir, e.Name()))
 	}
 	return os.Remove(dir) == nil
-}
-
-// StatesEqual compares two State values while treating nil and empty slices/maps identically.
-func StatesEqual(a, b *State) bool {
-	return statesEqual(a, b)
-}
-
-func statesEqual(a, b *State) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if a.Version != b.Version || a.ExcludeFingerprint != b.ExcludeFingerprint {
-		return false
-	}
-	if len(a.Targets) != len(b.Targets) {
-		return false
-	}
-	for k, tsA := range a.Targets {
-		tsB, ok := b.Targets[k]
-		if !ok || tsA == nil || tsB == nil {
-			if tsA != tsB {
-				return false
-			}
-			continue
-		}
-		if !stringSlicesEqual(tsA.OwnedDirs, tsB.OwnedDirs) {
-			return false
-		}
-		if len(tsA.Artifacts) != len(tsB.Artifacts) {
-			return false
-		}
-		for ak, recA := range tsA.Artifacts {
-			recB, ok := tsB.Artifacts[ak]
-			if !ok || !recordsEqual(recA, recB) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func recordsEqual(a, b ArtifactRecord) bool {
-	if a.ArtifactType != b.ArtifactType ||
-		a.SHA256 != b.SHA256 ||
-		a.BlockHash != b.BlockHash ||
-		a.CreatedByAgentfile != b.CreatedByAgentfile {
-		return false
-	}
-	if !stringSlicesEqual(a.JSONPointers, b.JSONPointers) {
-		return false
-	}
-	if len(a.JSONPointerHashes) != len(b.JSONPointerHashes) {
-		return false
-	}
-	for k, v := range a.JSONPointerHashes {
-		if b.JSONPointerHashes[k] != v {
-			return false
-		}
-	}
-	if len(a.ArrayEntries) != len(b.ArrayEntries) {
-		return false
-	}
-	for k, v := range a.ArrayEntries {
-		if !stringSlicesEqual(v, b.ArrayEntries[k]) {
-			return false
-		}
-	}
-	return true
-}
-
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

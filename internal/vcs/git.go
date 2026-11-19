@@ -50,10 +50,14 @@ func SyncExcludes(projectRoot string, relPaths []string, enabled bool) ([]string
 	var entries []string
 	seen := make(map[string]bool)
 	addEntry := func(p string) {
+		hadTrailingSlash := strings.HasSuffix(filepath.ToSlash(p), "/")
 		posix := filepath.ToSlash(filepath.Clean(p))
 		posix = strings.TrimPrefix(posix, "./")
 		if posix == "" || posix == "." {
 			return
+		}
+		if hadTrailingSlash && !strings.HasSuffix(posix, "/") {
+			posix += "/"
 		}
 		if !seen[posix] {
 			seen[posix] = true
@@ -61,8 +65,17 @@ func SyncExcludes(projectRoot string, relPaths []string, enabled bool) ([]string
 		}
 	}
 
-	// Always exclude agentfile local runtime/config state when git_exclude is active.
-	addEntry(".agentfile/")
+	// Always exclude agentfile local runtime/config state when git_exclude is active,
+	// leaving .agentfile/imported/ trackable in Git.
+	for _, rt := range []string{
+		".agentfile/state.json",
+		".agentfile/config.yaml",
+		".agentfile/sync.lock",
+		".agentfile/commit-journal.json",
+		".agentfile/backups/",
+	} {
+		addEntry(rt)
+	}
 
 	for _, p := range relPaths {
 		posix := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(p)), "./")

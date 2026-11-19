@@ -97,3 +97,75 @@ func TestSyncExcludesNoOpOutsideGitRepo(t *testing.T) {
 		t.Fatalf("expected clean no-op when disabled outside git repo: %v %v", warnings, err)
 	}
 }
+
+func TestSyncExcludesNarrowsAgentfileRuntimePaths(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	gitExec(t, dir, "init", "-b", "main")
+	_ = os.WriteFile(filepath.Join(dir, "README.md"), []byte("hi\n"), 0o644)
+	gitExec(t, dir, "add", "README.md")
+	gitExec(t, dir, "commit", "-m", "init")
+
+	// Create runtime files and imported trackable skill under .agentfile/.
+	for _, rel := range []string{
+		".agentfile/state.json",
+		".agentfile/config.yaml",
+		".agentfile/sync.lock",
+		".agentfile/commit-journal.json",
+		".agentfile/backups/20260101T000000Z/file.txt",
+		".agentfile/imported/skills/foo/SKILL.md",
+	} {
+		abs := filepath.Join(dir, filepath.FromSlash(rel))
+		_ = os.MkdirAll(filepath.Dir(abs), 0o755)
+		_ = os.WriteFile(abs, []byte("x\n"), 0o644)
+	}
+
+	warnings, err := SyncExcludes(dir, []string{"AGENTS.md"}, true)
+	if err != nil {
+		t.Fatalf("SyncExcludes failed: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	txt := string(raw)
+	for _, want := range []string{
+		"/.agentfile/state.json",
+		"/.agentfile/config.yaml",
+		"/.agentfile/sync.lock",
+		"/.agentfile/commit-journal.json",
+		"/.agentfile/backups/",
+		"/AGENTS.md",
+	} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("expected %q in .git/info/exclude:\n%s", want, txt)
+		}
+	}
+	for _, line := range strings.Split(txt, "\n") {
+		if strings.TrimSpace(line) == "/.agentfile" || strings.TrimSpace(line) == "/.agentfile/" {
+			t.Fatalf("must not exclude entire .agentfile/ directory:\n%s", txt)
+		}
+	}
+
+	// Verify git status shows .agentfile/imported/skills/foo/SKILL.md as untracked (trackable),
+	// while runtime files are ignored.
+	statusOut := gitExec(t, dir, "status", "--porcelain", "-uall")
+	if !strings.Contains(statusOut, ".agentfile/imported/skills/foo/SKILL.md") {
+		t.Fatalf("expected .agentfile/imported/skills/foo/SKILL.md to remain trackable in git status, got:\n%s", statusOut)
+	}
+	for _, ignored := range []string{
+		".agentfile/state.json",
+		".agentfile/config.yaml",
+		".agentfile/sync.lock",
+		".agentfile/commit-journal.json",
+		".agentfile/backups/",
+	} {
+		if strings.Contains(statusOut, ignored) {
+			t.Fatalf("expected %s to be excluded from git status, got:\n%s", ignored, statusOut)
+		}
+	}
+}

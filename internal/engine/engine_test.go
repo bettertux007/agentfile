@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1099,5 +1100,392 @@ func TestCommitSidecarWritesAndRollback(t *testing.T) {
 	var pe *spec.PolicyError
 	if !errors.As(err, &pe) {
 		t.Fatalf("expected PolicyError on escaping sidecar path, got %v", err)
+	}
+}
+
+func TestSharedArtifactOwnershipLifecycleAndValidation(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "local-skill")
+	_ = os.MkdirAll(skillDir, 0o755)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Auditor\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("# Existing Agents\n"), 0o644)
+
+	cfg := &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail", GitExclude: false}
+
+	// 1. Two adapters emit identical Shared: true OpManagedBlock (AGENTS.md) and OpMaterializeTree (.agents/skills/auditor).
+	resCodex := &adapters.CompileResult{
+		Target: "codex",
+		Files: []adapters.ArtifactOp{
+			{Target: "codex", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("Shared rules")},
+			{Target: "codex", RelPath: ".agents/skills/auditor", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir},
+		},
+	}
+	resCopilot := &adapters.CompileResult{
+		Target: "copilot",
+		Files: []adapters.ArtifactOp{
+			{Target: "copilot", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("Shared rules")},
+			{Target: "copilot", RelPath: ".agents/skills/auditor", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir},
+			{Target: "copilot", RelPath: ".github/copilot-instructions.md", Kind: adapters.OpWriteDropIn, Content: []byte("Copilot only\n")},
+		},
+	}
+
+	plan1, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"codex", "copilot"},
+		Config:          cfg,
+		CompiledResults: []*adapters.CompileResult{resCodex, resCopilot},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan shared failed: %v", err)
+	}
+	// Must emit a single action per shared artifact (2 shared + 1 copilot-only = 3).
+	if len(plan1.Actions) != 3 {
+		t.Fatalf("expected 3 planned actions (deduped shared ops), got %d: %+v", len(plan1.Actions), plan1.Actions)
+	}
+	for _, a := range plan1.Actions {
+		if (a.RelPath == "AGENTS.md" || a.RelPath == ".agents/skills/auditor") && a.Target != "shared" {
+			t.Fatalf("expected shared PlannedAction.Target == 'shared', got %q for %s", a.Target, a.RelPath)
+		}
+	}
+	if len(plan1.NextState.Shared) != 2 {
+		t.Fatalf("expected 2 entries in NextState.Shared, got %+v", plan1.NextState.Shared)
+	}
+	if gotOwners := plan1.NextState.Shared["AGENTS.md"].Owners; len(gotOwners) != 2 || gotOwners[0] != "codex" || gotOwners[1] != "copilot" {
+		t.Fatalf("unexpected AGENTS.md owners: %v", gotOwners)
+	}
+	if gotOwners := plan1.NextState.Shared[".agents/skills/auditor"].Owners; len(gotOwners) != 2 || gotOwners[0] != "codex" || gotOwners[1] != "copilot" {
+		t.Fatalf("unexpected .agents/skills/auditor owners: %v", gotOwners)
+	}
+	if len(plan1.NextState.SharedOwnedDirs) == 0 {
+		t.Fatalf("expected .agents/skills and .agents in SharedOwnedDirs")
+	}
+	if len(plan1.AllExcludePath) != 3 {
+		t.Fatalf("expected 3 paths in AllExcludePath (including Shared), got %v", plan1.AllExcludePath)
+	}
+	for _, td := range plan1.NextState.Targets["codex"].OwnedDirs {
+		if td == ".agents" || td == ".agents/skills" {
+			t.Fatalf("shared dirs must not be placed in target OwnedDirs: %v", plan1.NextState.Targets["codex"].OwnedDirs)
+		}
+	}
+
+	if err := Commit(plan1); err != nil {
+		t.Fatalf("Commit shared failed: %v", err)
+	}
+	agentsBytes, _ := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if !strings.Contains(string(agentsBytes), "# Existing Agents") || !strings.Contains(string(agentsBytes), "Shared rules") {
+		t.Fatalf("unexpected AGENTS.md content:\n%s", agentsBytes)
+	}
+
+	// Idempotent resync reports all 3 artifacts unchanged and 0 actions.
+	planIdem, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"codex", "copilot"},
+		Config:          cfg,
+		CompiledResults: []*adapters.CompileResult{resCodex, resCopilot},
+	})
+	if err != nil {
+		t.Fatalf("idempotent BuildPlan failed: %v", err)
+	}
+	if len(planIdem.Actions) != 0 || len(planIdem.Summary.Unchanged) != 3 {
+		t.Fatalf("expected 0 actions and 3 unchanged on resync, got actions=%d summary=%+v", len(planIdem.Actions), planIdem.Summary)
+	}
+
+	// Subset sync (--targets codex) where codex STILL emits shared ops preserves copilot in Owners.
+	planSubsetKeep, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"codex"},
+		Config:          cfg,
+		CompiledResults: []*adapters.CompileResult{resCodex},
+	})
+	if err != nil {
+		t.Fatalf("subset-keep BuildPlan failed: %v", err)
+	}
+	if got := planSubsetKeep.NextState.Shared["AGENTS.md"].Owners; len(got) != 2 || got[0] != "codex" || got[1] != "copilot" {
+		t.Fatalf("expected AGENTS.md owners=[codex copilot] preserved on subset sync, got %v", got)
+	}
+
+	// 2. Subset sync (--targets codex) where codex stops emitting shared ops keeps shared artifacts alive for copilot.
+	planSubset, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"codex"},
+		Config:        cfg,
+		CompiledResults: []*adapters.CompileResult{
+			{Target: "codex", Files: nil},
+		},
+	})
+	if err != nil {
+		t.Fatalf("subset BuildPlan failed: %v", err)
+	}
+	if len(planSubset.PruneOps) != 0 {
+		t.Fatalf("expected 0 PruneOps while copilot still owns shared artifacts, got %+v", planSubset.PruneOps)
+	}
+	if got := planSubset.NextState.Shared["AGENTS.md"].Owners; len(got) != 1 || got[0] != "copilot" {
+		t.Fatalf("expected AGENTS.md owners=[copilot] after codex dropped it, got %v", got)
+	}
+	if err := Commit(planSubset); err != nil {
+		t.Fatalf("subset Commit failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agents", "skills", "auditor", "SKILL.md")); err != nil {
+		t.Fatalf("expected shared skill preserved while copilot owns it: %v", err)
+	}
+
+	// Re-sync codex + copilot so both own shared artifacts again, then test subset Clean.
+	planRestore, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"codex", "copilot"},
+		Config:          cfg,
+		CompiledResults: []*adapters.CompileResult{resCodex, resCopilot},
+	})
+	if err != nil || Commit(planRestore) != nil {
+		t.Fatalf("restore shared ownership failed: %v", err)
+	}
+
+	// Subset Clean("codex") removes codex from Owners without deleting shared files.
+	cleanCodex, err := Clean(dir, []string{"codex"}, false)
+	if err != nil {
+		t.Fatalf("Clean(codex) failed: %v", err)
+	}
+	if len(cleanCodex.Pruned) != 0 || len(cleanCodex.Updated) != 0 {
+		t.Fatalf("expected no shared files pruned/updated on Clean(codex), got %+v", cleanCodex)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agents", "skills", "auditor", "SKILL.md")); err != nil {
+		t.Fatalf("expected shared skill kept after Clean(codex): %v", err)
+	}
+	stAfterCodexClean, err := LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stAfterCodexClean.Shared["AGENTS.md"].Owners; len(got) != 1 || got[0] != "copilot" {
+		t.Fatalf("expected AGENTS.md owners=[copilot] after Clean(codex), got %v", got)
+	}
+
+	// Subset Clean("copilot") removes last owner -> prunes shared block in AGENTS.md, deletes .agents/skills/auditor & SharedOwnedDirs, removes state.json.
+	cleanCopilot, err := Clean(dir, []string{"copilot"}, false)
+	if err != nil {
+		t.Fatalf("Clean(copilot) failed: %v", err)
+	}
+	if len(cleanCopilot.Pruned) != 2 || len(cleanCopilot.Updated) != 1 {
+		t.Fatalf("expected 2 pruned (.agents/skills/auditor, copilot-instructions.md) and 1 updated (AGENTS.md), got %+v", cleanCopilot)
+	}
+	agentsAfterClean, _ := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if string(agentsAfterClean) != "# Existing Agents\n" {
+		t.Fatalf("expected AGENTS.md restored to original content, got %q", agentsAfterClean)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agents")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected empty SharedOwnedDirs .agents to be pruned")
+	}
+	if _, err := os.Stat(StatePath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected state.json removed after all targets and shared artifacts cleaned")
+	}
+}
+
+func TestSharedArtifactCollisionAndMismatchPolicies(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	skillA := filepath.Join(dir, "skill-a")
+	skillB := filepath.Join(dir, "skill-b")
+	_ = os.MkdirAll(skillA, 0o755)
+	_ = os.MkdirAll(skillB, 0o755)
+	_ = os.WriteFile(filepath.Join(skillA, "SKILL.md"), []byte("# A"), 0o644)
+	_ = os.WriteFile(filepath.Join(skillB, "SKILL.md"), []byte("# B"), 0o644)
+
+	cfg := &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail"}
+
+	cases := []struct {
+		name string
+		ops  []*adapters.CompileResult
+	}{
+		{
+			name: "differ_in_kind",
+			ops: []*adapters.CompileResult{
+				{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("x")}}},
+				{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: "AGENTS.md", Kind: adapters.OpWriteOwned, Shared: true, Content: []byte("x")}}},
+			},
+		},
+		{
+			name: "differ_in_content",
+			ops: []*adapters.CompileResult{
+				{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("x")}}},
+				{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("y")}}},
+			},
+		},
+		{
+			name: "differ_in_source_path",
+			ops: []*adapters.CompileResult{
+				{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: ".agents/skills/s", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillA}}},
+				{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: ".agents/skills/s", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillB}}},
+			},
+		},
+		{
+			name: "differ_in_is_remote",
+			ops: []*adapters.CompileResult{
+				{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: ".agents/skills/s", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillA, IsRemote: false}}},
+				{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: ".agents/skills/s", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillA, IsRemote: true}}},
+			},
+		},
+		{
+			name: "differ_only_in_case",
+			ops: []*adapters.CompileResult{
+				{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("x")}}},
+				{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: "agents.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("x")}}},
+			},
+		},
+		{
+			name: "mix_shared_true_and_false",
+			ops: []*adapters.CompileResult{
+				{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("x")}}},
+				{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: false, Content: []byte("x")}}},
+			},
+		},
+		{
+			name: "mix_shared_false_and_true",
+			ops: []*adapters.CompileResult{
+				{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: false, Content: []byte("x")}}},
+				{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("x")}}},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := BuildPlan(PlanInput{
+				ProjectRoot:     dir,
+				ActiveTargets:   []string{"codex", "copilot"},
+				Config:          cfg,
+				CompiledResults: tc.ops,
+			})
+			var pe *spec.PolicyError
+			if !errors.As(err, &pe) {
+				t.Fatalf("%s: expected *spec.PolicyError, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestSharedArtifactInspectConflictsAndPrune(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "skill-src")
+	_ = os.MkdirAll(skillDir, 0o755)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# S\n"), 0o644)
+
+	// Pre-existing unmanaged .agents/skills/auditor directory triggers conflict.
+	unmanagedSkill := filepath.Join(dir, ".agents", "skills", "auditor")
+	_ = os.MkdirAll(unmanagedSkill, 0o755)
+	_ = os.WriteFile(filepath.Join(unmanagedSkill, "SKILL.md"), []byte("handwritten"), 0o644)
+
+	plan, err := BuildPlan(PlanInput{
+		ProjectRoot:      dir,
+		ActiveTargets:    []string{"codex", "copilot"},
+		Config:           &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail"},
+		InspectConflicts: true,
+		CompiledResults: []*adapters.CompileResult{
+			{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: ".agents/skills/auditor", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir}}},
+			{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: ".agents/skills/auditor", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan InspectConflicts failed: %v", err)
+	}
+	if len(plan.Conflicts) != 1 {
+		t.Fatalf("expected 1 shared conflict, got %+v", plan.Conflicts)
+	}
+	c := plan.Conflicts[0]
+	if c.Target != "shared" || c.RelPath != ".agents/skills/auditor" || len(c.Owners) != 2 || c.Owners[0] != "codex" || c.Owners[1] != "copilot" {
+		t.Fatalf("unexpected shared PlanConflict: %+v", c)
+	}
+
+	// Sync with overwrite, then prune when both targets stop emitting shared artifact.
+	planOW, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"codex", "copilot"},
+		Config:        &config.EffectiveConfig{LinkMode: "copy", OnConflict: "overwrite"},
+		CompiledResults: []*adapters.CompileResult{
+			{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: ".agents/skills/auditor", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir}}},
+			{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: ".agents/skills/auditor", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir}}},
+		},
+	})
+	if err != nil || Commit(planOW) != nil {
+		t.Fatalf("overwrite commit failed: %v", err)
+	}
+
+	// Now both targets stop emitting -> PruneOps emitted once with Target: "shared", and Commit prunes SharedOwnedDirs.
+	planPrune, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"codex", "copilot"},
+		Config:        &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail"},
+		CompiledResults: []*adapters.CompileResult{
+			{Target: "codex", Files: nil},
+			{Target: "copilot", Files: nil},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan prune failed: %v", err)
+	}
+	if len(planPrune.PruneOps) != 1 || planPrune.PruneOps[0].Target != "shared" || planPrune.PruneOps[0].RelPath != ".agents/skills/auditor" {
+		t.Fatalf("expected 1 shared PruneOp, got %+v", planPrune.PruneOps)
+	}
+	if err := Commit(planPrune); err != nil {
+		t.Fatalf("Commit prune failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agents", "skills", "auditor")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected .agents/skills/auditor deleted on Commit(planPrune)")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agents")); err != nil {
+		t.Fatalf("pre-existing user .agents directory must not be deleted by SharedOwnedDirs: %v", err)
+	}
+
+	// Now create a shared skill under a non-existent .agents/skills/fresh directory so agentfile owns .agents, then prune via BuildPlan+Commit.
+	_ = os.RemoveAll(filepath.Join(dir, ".agents"))
+	planFresh, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"codex", "copilot"},
+		Config:        &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail"},
+		CompiledResults: []*adapters.CompileResult{
+			{Target: "codex", Files: []adapters.ArtifactOp{{Target: "codex", RelPath: ".agents/skills/fresh", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir}}},
+			{Target: "copilot", Files: []adapters.ArtifactOp{{Target: "copilot", RelPath: ".agents/skills/fresh", Kind: adapters.OpMaterializeTree, Shared: true, SourcePath: skillDir}}},
+		},
+	})
+	if err != nil || Commit(planFresh) != nil {
+		t.Fatalf("fresh shared commit failed: %v", err)
+	}
+	planFreshPrune, err := BuildPlan(PlanInput{
+		ProjectRoot:   dir,
+		ActiveTargets: []string{"codex", "copilot"},
+		Config:        &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail"},
+		CompiledResults: []*adapters.CompileResult{
+			{Target: "codex", Files: nil},
+			{Target: "copilot", Files: nil},
+		},
+	})
+	if err != nil || Commit(planFreshPrune) != nil {
+		t.Fatalf("fresh shared prune commit failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agents")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected agentfile-created .agents SharedOwnedDirs pruned on Commit")
+	}
+
+	// Verify StatesEqual checks Shared and SharedOwnedDirs.
+	s1 := &State{
+		Version:         StateVersion,
+		Targets:         map[string]*TargetState{},
+		Shared:          map[string]SharedArtifactRecord{"AGENTS.md": {Record: ArtifactRecord{ArtifactType: TypeMarkdownBlock, BlockHash: "h1"}, Owners: []string{"codex"}}},
+		SharedOwnedDirs: []string{".agents"},
+	}
+	s2 := cloneState(s1)
+	if !StatesEqual(s1, s2) {
+		t.Fatalf("expected cloned shared state to compare equal")
+	}
+	s2.Shared["AGENTS.md"] = SharedArtifactRecord{Record: ArtifactRecord{ArtifactType: TypeMarkdownBlock, BlockHash: "h1"}, Owners: []string{"codex", "copilot"}}
+	if StatesEqual(s1, s2) {
+		t.Fatalf("expected differing Shared Owners to compare unequal")
+	}
+	s3 := cloneState(s1)
+	s3.SharedOwnedDirs = nil
+	if StatesEqual(s1, s3) {
+		t.Fatalf("expected differing SharedOwnedDirs to compare unequal")
 	}
 }
