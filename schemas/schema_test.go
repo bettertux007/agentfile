@@ -82,3 +82,35 @@ func TestValidateUserGlobalConfigSchema(t *testing.T) {
 		t.Fatalf("expected agentfile-config.schema.json description to mention both .agentfile/config.yaml and ~/.config/agentfile/config.yaml")
 	}
 }
+
+func TestValidateAgentfileV1Sprint2TargetsAndRulesMode(t *testing.T) {
+	t.Parallel()
+
+	valid := []byte(`
+version: 1
+targets: [claude, opencode, gemini, cursor, codex, copilot, windsurf]
+targets_config:
+  claude:
+    rules_mode: dropin
+  codex:
+    rules_mode: agents_md
+  copilot:
+    rules_mode: copilot
+  windsurf:
+    rules_mode: dropin
+`)
+	if err := ValidateAgentfileV1(valid); err != nil {
+		t.Fatalf("expected Sprint 2 targets and rules_mode to validate: %v", err)
+	}
+
+	invalidCases := [][]byte{
+		[]byte("version: 1\ntargets: [aider]\n"),
+		[]byte("version: 1\ntargets: [codex]\ntargets_config:\n  aider:\n    on_unsupported: warn\n"),
+		[]byte("version: 1\ntargets: [codex]\ntargets_config:\n  codex:\n    rules_mode: legacy\n"),
+	}
+	for _, tc := range invalidCases {
+		if err := ValidateAgentfileV1(tc); err == nil {
+			t.Fatalf("expected schema error for:\n%s", tc)
+		}
+	}
+}

@@ -19,6 +19,9 @@ var knownTargets = map[string]bool{
 	"opencode": true,
 	"gemini":   true,
 	"cursor":   true,
+	"codex":    true,
+	"copilot":  true,
+	"windsurf": true,
 }
 
 // ParseFile reads and validates an Agentfile.yaml from disk.
@@ -69,7 +72,7 @@ func Validate(s *ProjectSpec) error {
 	seenTargets := make(map[string]bool, len(s.Targets))
 	for _, t := range s.Targets {
 		if !knownTargets[t] {
-			return NewPolicyError("unknown target %q (supported: claude, opencode, gemini, cursor)", t)
+			return NewPolicyError("unknown target %q (supported: claude, opencode, gemini, cursor, codex, copilot, windsurf)", t)
 		}
 		if seenTargets[t] {
 			return NewPolicyError("duplicate target %q", t)
@@ -160,9 +163,9 @@ func Validate(s *ProjectSpec) error {
 			return NewPolicyError("targets_config.%s.on_isolation_unsupported: invalid value %q (expected fail or warn)", target, cfg.OnIsolationUnsupported)
 		}
 		switch cfg.RulesMode {
-		case "", "dropin":
+		case "", "dropin", "agents_md", "copilot":
 		default:
-			return NewPolicyError("targets_config.%s.rules_mode: invalid value %q (expected dropin)", target, cfg.RulesMode)
+			return NewPolicyError("targets_config.%s.rules_mode: invalid value %q (expected dropin, agents_md, or copilot)", target, cfg.RulesMode)
 		}
 	}
 

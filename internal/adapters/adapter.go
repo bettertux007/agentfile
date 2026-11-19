@@ -17,6 +17,7 @@ type ArtifactOpKind string
 const (
 	OpWriteOwned      ArtifactOpKind = "write_owned"
 	OpMergeJSONC      ArtifactOpKind = "merge_jsonc"
+	OpMergeTOML       ArtifactOpKind = "merge_toml"
 	OpWriteDropIn     ArtifactOpKind = "write_dropin"
 	OpManagedBlock    ArtifactOpKind = "managed_block"
 	OpMaterializeTree ArtifactOpKind = "materialize_tree"
@@ -29,15 +30,22 @@ type JSONMergeSpec struct {
 	ArrayEntries map[string][]string // RFC 6901 pointer (e.g. "/permissions/allow") -> managed strings
 }
 
+// TOMLMergeSpec describes structured table-key mutations inside a TOML file.
+type TOMLMergeSpec struct {
+	TableEntries map[string]any // Dotted table path (e.g. "mcp_servers.github") -> value
+}
+
 // ArtifactOp is a pure compiled output operation produced by an adapter.
 type ArtifactOp struct {
 	Target     string
 	RelPath    string
 	Kind       ArtifactOpKind
+	Shared     bool           // True when multiple targets co-own the same RelPath (e.g. AGENTS.md)
 	Content    []byte         // Used for OpWriteOwned, OpWriteDropIn, OpManagedBlock
 	SourcePath string         // Used for OpMaterializeTree
 	IsRemote   bool           // Provenance for OpMaterializeTree
 	JSONMerge  *JSONMergeSpec // Used for OpMergeJSONC
+	TOMLMerge  *TOMLMergeSpec // Used for OpMergeTOML
 }
 
 // ProbeRequest asks engine.Plan to check a workspace file's existence without giving adapters filesystem access.

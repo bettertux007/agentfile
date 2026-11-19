@@ -1,8 +1,12 @@
 package adapters
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bettertux007/agentfile/internal/ir"
 )
 
 func TestMarshalJSONNoEscape(t *testing.T) {
@@ -42,5 +46,68 @@ func TestCompareSemverAndValidateForbiddenFlags(t *testing.T) {
 	badArgs := []string{"-p", "hi", "--setting-sources=user"}
 	if diags := ValidateForbiddenFlags("claude", badArgs, []string{"--setting-sources"}, []string{"-p"}); len(diags) != 1 {
 		t.Fatalf("expected 1 forbidden flag error, got %+v", diags)
+	}
+}
+
+func TestArtifactOpContractsAndFormatManagedRulesBlock(t *testing.T) {
+	t.Parallel()
+
+	// Verify OpMergeTOML, TOMLMergeSpec, Shared, and TOMLMerge contract fields.
+	if OpMergeTOML != "merge_toml" {
+		t.Fatalf("unexpected OpMergeTOML: %q", OpMergeTOML)
+	}
+	op := ArtifactOp{
+		Target:  "codex",
+		RelPath: ".codex/config.toml",
+		Kind:    OpMergeTOML,
+		Shared:  true,
+		TOMLMerge: &TOMLMergeSpec{
+			TableEntries: map[string]any{"mcp_servers.github": map[string]any{"url": "https://example.com"}},
+		},
+	}
+	if !op.Shared || op.TOMLMerge == nil || len(op.TOMLMerge.TableEntries) != 1 {
+		t.Fatalf("unexpected ArtifactOp fields: %+v", op)
+	}
+
+	// Empty rules must return nil.
+	if got := FormatManagedRulesBlock(nil); got != nil {
+		t.Fatalf("expected nil for nil rules, got %q", got)
+	}
+	if got := FormatManagedRulesBlock([]ir.IRRule{}); got != nil {
+		t.Fatalf("expected nil for empty rules, got %q", got)
+	}
+
+	// Single rule must match gemini/testdata/gemini.golden.md layout byte-for-byte.
+	golden, err := os.ReadFile(filepath.Join("gemini", "testdata", "gemini.golden.md"))
+	if err != nil {
+		t.Fatalf("read gemini golden: %v", err)
+	}
+	gotSingle := FormatManagedRulesBlock([]ir.IRRule{
+		{
+			Name:        "coding",
+			Description: "Go rules",
+			Globs:       []string{"**/*.go"},
+			Content:     []byte("Always run go test.\n"),
+		},
+	})
+	if string(gotSingle) != string(golden) {
+		t.Fatalf("FormatManagedRulesBlock single rule mismatch:\ngot:\n%q\nwant:\n%q", gotSingle, golden)
+	}
+
+	// Multiple rules: deterministic separator and trailing newline normalization.
+	gotMulti := FormatManagedRulesBlock([]ir.IRRule{
+		{
+			Name:    "first",
+			Content: []byte("Rule one"),
+		},
+		{
+			Name:        "second",
+			Description: "Second scope",
+			Content:     []byte("Rule two\n"),
+		},
+	})
+	wantMulti := "# Project Agent Instructions\n\n## first\n\nRule one\n\n---\n\n## second\n\n*Scope:* Second scope\n\nRule two\n"
+	if string(gotMulti) != wantMulti {
+		t.Fatalf("FormatManagedRulesBlock multi rule mismatch:\ngot:\n%q\nwant:\n%q", gotMulti, wantMulti)
 	}
 }

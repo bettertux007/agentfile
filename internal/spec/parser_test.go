@@ -166,3 +166,49 @@ func TestParseRejectsInvalidInputs(t *testing.T) {
 		t.Fatalf("unexpected load_global target config: %+v", lgSpec.TargetsConfig["claude"])
 	}
 }
+
+func TestParseSprint2TargetsAndRulesModes(t *testing.T) {
+	t.Parallel()
+
+	const input = `
+version: 1
+targets:
+  - claude
+  - opencode
+  - gemini
+  - cursor
+  - codex
+  - copilot
+  - windsurf
+targets_config:
+  claude:
+    rules_mode: dropin
+  codex:
+    rules_mode: agents_md
+  copilot:
+    rules_mode: copilot
+  windsurf:
+    rules_mode: dropin
+`
+	ps, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse failed for 7 targets and Sprint 2 rules_mode values: %v", err)
+	}
+	if len(ps.Targets) != 7 {
+		t.Fatalf("expected 7 targets, got %d", len(ps.Targets))
+	}
+	if ps.TargetsConfig["codex"].RulesMode != "agents_md" || ps.TargetsConfig["copilot"].RulesMode != "copilot" {
+		t.Fatalf("unexpected rules_mode values: %+v", ps.TargetsConfig)
+	}
+
+	// Unknown targets and unknown rules_mode must still be rejected.
+	badCases := []string{
+		"version: 1\ntargets: [aider]\n",
+		"version: 1\ntargets: [codex]\ntargets_config:\n  codex:\n    rules_mode: unknown_mode\n",
+	}
+	for _, y := range badCases {
+		if _, err := Parse(strings.NewReader(y)); err == nil {
+			t.Fatalf("expected PolicyError for:\n%s", y)
+		}
+	}
+}

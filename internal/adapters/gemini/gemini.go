@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"bytes"
 	"fmt"
 	"sort"
 	"strings"
@@ -197,7 +196,7 @@ func (a *Adapter) Compile(bundle *ir.Bundle, _ adapters.ProbeResults) (*adapters
 			Target:  a.Name(),
 			RelPath: "GEMINI.md",
 			Kind:    adapters.OpManagedBlock,
-			Content: compileRulesMarkdown(bundle.Rules),
+			Content: adapters.FormatManagedRulesBlock(bundle.Rules),
 		})
 	}
 
@@ -280,37 +279,6 @@ func (a *Adapter) renderEnv(es spec.EnvString, warnMode bool) (string, []adapter
 		b.WriteString("}")
 	}
 	return b.String(), diags
-}
-
-func compileRulesMarkdown(rules []ir.IRRule) []byte {
-	var buf bytes.Buffer
-	buf.WriteString("# Project Agent Instructions\n\n")
-	for i, rl := range rules {
-		if i > 0 {
-			buf.WriteString("\n---\n\n")
-		}
-		buf.WriteString("## ")
-		buf.WriteString(rl.Name)
-		buf.WriteString("\n\n")
-		if rl.Description != "" {
-			buf.WriteString("*Scope:* ")
-			buf.WriteString(rl.Description)
-			buf.WriteString("\n")
-		}
-		if len(rl.Globs) > 0 {
-			buf.WriteString("*Applies to:* `")
-			buf.WriteString(strings.Join(rl.Globs, "`, `"))
-			buf.WriteString("`\n")
-		}
-		if rl.Description != "" || len(rl.Globs) > 0 {
-			buf.WriteString("\n")
-		}
-		buf.Write(rl.Content)
-		if len(rl.Content) > 0 && rl.Content[len(rl.Content)-1] != '\n' {
-			buf.WriteByte('\n')
-		}
-	}
-	return buf.Bytes()
 }
 
 func escapeJSONPointer(s string) string {

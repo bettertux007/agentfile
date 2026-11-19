@@ -20,7 +20,7 @@
       "uniqueItems": true,
       "items": {
         "type": "string",
-        "enum": ["claude", "opencode", "gemini", "cursor"]
+        "enum": ["claude", "opencode", "gemini", "cursor", "codex", "copilot", "windsurf"]
       },
       "examples": [
         ["claude", "opencode"],
@@ -65,7 +65,7 @@
       "type": "object",
       "description": "Per-target compiler behavior overrides and unsupported-feature degradation policy.",
       "propertyNames": {
-        "enum": ["claude", "opencode", "gemini", "cursor"]
+        "enum": ["claude", "opencode", "gemini", "cursor", "codex", "copilot", "windsurf"]
       },
       "additionalProperties": {
         "$ref": "#/$defs/targetConfig"
@@ -297,9 +297,9 @@
         },
         "rules_mode": {
           "type": "string",
-          "enum": ["dropin"],
+          "enum": ["dropin", "agents_md", "copilot"],
           "default": "dropin",
-          "description": "Rule emission mode (dropin)."
+          "description": "Rule emission mode (dropin, agents_md, copilot)."
         },
         "overrides": {
           "type": "object",
