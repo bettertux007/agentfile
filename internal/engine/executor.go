@@ -462,6 +462,25 @@ func cleanTrackedArtifact(projectRoot, rel string, rec ArtifactRecord, dryRun bo
 		}
 	}
 
+	if rec.ArtifactType == TypeTOMLPatch {
+		curBytes, err := os.ReadFile(abs)
+		if err == nil {
+			updatedBytes, deleteFile, rerr := RemoveTOML(curBytes, rec)
+			if rerr != nil {
+				return rerr
+			}
+			if !deleteFile {
+				summary.Updated = append(summary.Updated, rel)
+				if !dryRun {
+					if err := writeFileAtomic(abs, updatedBytes, 0o644); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+		}
+	}
+
 	if rec.ArtifactType == TypeMarkdownBlock {
 		curBytes, err := os.ReadFile(abs)
 		if err == nil {

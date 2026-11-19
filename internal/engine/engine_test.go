@@ -1489,3 +1489,125 @@ func TestSharedArtifactInspectConflictsAndPrune(t *testing.T) {
 		t.Fatalf("expected differing SharedOwnedDirs to compare unequal")
 	}
 }
+
+func TestOpMergeTOMLPlanCommitPruneAndClean(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Pre-populate .codex/config.toml with user keys and one colliding key for InspectConflicts.
+	codexDir := filepath.Join(dir, ".codex")
+	_ = os.MkdirAll(codexDir, 0o755)
+	_ = os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte("model = \"gpt-5\"\n\n[mcp_servers.personal]\ncommand = \"python3\"\n\n[mcp_servers.gh]\nurl = \"https://old\"\n"), 0o644)
+
+	cfgFail := &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail"}
+	res := []*adapters.CompileResult{{
+		Target: "codex",
+		Files: []adapters.ArtifactOp{{
+			Target:  "codex",
+			RelPath: ".codex/config.toml",
+			Kind:    adapters.OpMergeTOML,
+			TOMLMerge: &adapters.TOMLMergeSpec{
+				TableEntries: map[string]any{
+					"mcp_servers.gh": map[string]any{"url": "https://new"},
+				},
+			},
+		}},
+	}}
+
+	// InspectConflicts records conflict and OldContent without calling prompter.
+	var validatedBytes []byte
+	planInspect, err := BuildPlan(PlanInput{
+		ProjectRoot:      dir,
+		ActiveTargets:    []string{"codex"},
+		Config:           cfgFail,
+		CompiledResults:  res,
+		Prompter:         panicPrompter{},
+		InspectConflicts: true,
+		ValidatePolicy: func(target string, mergedFiles map[string][]byte) []adapters.Diagnostic {
+			validatedBytes = mergedFiles[".codex/config.toml"]
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan InspectConflicts failed: %v", err)
+	}
+	if len(planInspect.Conflicts) != 1 || planInspect.Conflicts[0].RelPath != ".codex/config.toml" {
+		t.Fatalf("expected 1 TOML conflict, got %+v", planInspect.Conflicts)
+	}
+	if len(validatedBytes) == 0 {
+		t.Fatalf("expected ValidatePolicy to receive merged .codex/config.toml bytes")
+	}
+	if len(planInspect.Actions) != 1 || len(planInspect.Actions[0].OldContent) == 0 {
+		t.Fatalf("expected OldContent captured on OpMergeTOML PlannedAction")
+	}
+
+	// Commit with overwrite.
+	planOW, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"codex"},
+		Config:          &config.EffectiveConfig{LinkMode: "copy", OnConflict: "overwrite"},
+		CompiledResults: res,
+	})
+	if err != nil || Commit(planOW) != nil {
+		t.Fatalf("overwrite BuildPlan/Commit failed: %v", err)
+	}
+
+	// Idempotent resync must still pass mergedFiles to ValidatePolicy and report Unchanged.
+	var validatedOnResync []byte
+	planResync, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"codex"},
+		Config:          cfgFail,
+		CompiledResults: res,
+		ValidatePolicy: func(target string, mergedFiles map[string][]byte) []adapters.Diagnostic {
+			validatedOnResync = mergedFiles[".codex/config.toml"]
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("resync BuildPlan failed: %v", err)
+	}
+	if len(planResync.Actions) != 0 || len(planResync.Summary.Unchanged) != 1 {
+		t.Fatalf("expected unchanged on TOML resync, got actions=%d summary=%+v", len(planResync.Actions), planResync.Summary)
+	}
+	if len(validatedOnResync) == 0 {
+		t.Fatalf("expected ValidatePolicy to receive mergedFiles on unchanged TOML resync")
+	}
+
+	// Prune via BuildPlan when codex stops emitting .codex/config.toml -> preserves model & personal.
+	planPrune, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"codex"},
+		Config:          cfgFail,
+		CompiledResults: []*adapters.CompileResult{{Target: "codex", Files: nil}},
+	})
+	if err != nil || Commit(planPrune) != nil {
+		t.Fatalf("prune BuildPlan/Commit failed: %v", err)
+	}
+	afterPrune, _ := os.ReadFile(filepath.Join(codexDir, "config.toml"))
+	if strings.Contains(string(afterPrune), "https://new") || !strings.Contains(string(afterPrune), "personal") || !strings.Contains(string(afterPrune), "gpt-5") {
+		t.Fatalf("unexpected .codex/config.toml after prune:\n%s", afterPrune)
+	}
+
+	// Fresh agentfile-created .codex/config.toml is deleted by Clean.
+	_ = os.RemoveAll(codexDir)
+	planFresh, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"codex"},
+		Config:          cfgFail,
+		CompiledResults: res,
+	})
+	if err != nil || Commit(planFresh) != nil {
+		t.Fatalf("fresh BuildPlan/Commit failed: %v", err)
+	}
+	sum, err := Clean(dir, []string{"codex"}, false)
+	if err != nil {
+		t.Fatalf("Clean failed: %v", err)
+	}
+	if len(sum.Pruned) != 1 || sum.Pruned[0] != ".codex/config.toml" {
+		t.Fatalf("expected .codex/config.toml pruned on Clean, got %+v", sum)
+	}
+	if _, err := os.Stat(filepath.Join(codexDir, "config.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected agentfile-created .codex/config.toml deleted by Clean")
+	}
+}

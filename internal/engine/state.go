@@ -20,6 +20,7 @@ const (
 	TypeDir           ArtifactType = "dir"
 	TypeSymlink       ArtifactType = "symlink"
 	TypeJSONCPatch    ArtifactType = "jsonc_patch"
+	TypeTOMLPatch     ArtifactType = "toml_patch"
 	TypeMarkdownBlock ArtifactType = "markdown_block"
 )
 
@@ -51,6 +52,8 @@ type ArtifactRecord struct {
 	JSONPointers       []string            `json:"json_pointers,omitempty"`
 	JSONPointerHashes  map[string]string   `json:"json_pointer_hashes,omitempty"`
 	ArrayEntries       map[string][]string `json:"array_entries,omitempty"`
+	TOMLKeys           []string            `json:"toml_keys,omitempty"`
+	TOMLKeyHashes      map[string]string   `json:"toml_key_hashes,omitempty"`
 	BlockHash          string              `json:"block_hash,omitempty"`
 	CreatedByAgentfile bool                `json:"created_by_agentfile"`
 }
@@ -126,6 +129,13 @@ func cloneArtifactRecord(rec ArtifactRecord) ArtifactRecord {
 		nrec.ArrayEntries = make(map[string][]string, len(rec.ArrayEntries))
 		for ak, av := range rec.ArrayEntries {
 			nrec.ArrayEntries[ak] = append([]string(nil), av...)
+		}
+	}
+	nrec.TOMLKeys = append([]string(nil), rec.TOMLKeys...)
+	if rec.TOMLKeyHashes != nil {
+		nrec.TOMLKeyHashes = make(map[string]string, len(rec.TOMLKeyHashes))
+		for tk, tv := range rec.TOMLKeyHashes {
+			nrec.TOMLKeyHashes[tk] = tv
 		}
 	}
 	return nrec
@@ -232,6 +242,17 @@ func recordsEqual(a, b ArtifactRecord) bool {
 	}
 	for k, v := range a.ArrayEntries {
 		if !stringSlicesEqual(v, b.ArrayEntries[k]) {
+			return false
+		}
+	}
+	if !stringSlicesEqual(a.TOMLKeys, b.TOMLKeys) {
+		return false
+	}
+	if len(a.TOMLKeyHashes) != len(b.TOMLKeyHashes) {
+		return false
+	}
+	for k, v := range a.TOMLKeyHashes {
+		if b.TOMLKeyHashes[k] != v {
 			return false
 		}
 	}

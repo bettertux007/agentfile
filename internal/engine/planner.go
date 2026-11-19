@@ -562,6 +562,53 @@ func planSingleArtifactOp(
 		})
 		return nextRec, true, mergedBytes, nil
 
+	case adapters.OpMergeTOML:
+		var existing []byte
+		exists := false
+		if b, err := os.ReadFile(absPath); err == nil {
+			existing = b
+			exists = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return ArtifactRecord{}, false, nil, err
+		}
+		oldKind, oldLinkTarget, oldContent, _, ierr := inspectExistingPath(absPath, existing)
+		if ierr != nil {
+			return ArtifactRecord{}, false, nil, ierr
+		}
+
+		var prevPtr *ArtifactRecord
+		if wasOwned {
+			cp := prevRec
+			prevPtr = &cp
+		}
+		mergedBytes, nextRec, needsBackup, err := MergeTOML(existing, exists, op.TOMLMerge, prevPtr, onConflict)
+		if err != nil {
+			return ArtifactRecord{}, false, nil, err
+		}
+
+		if !exists {
+			plan.Summary.Created = append(plan.Summary.Created, op.RelPath)
+		} else if bytes.Equal(existing, mergedBytes) {
+			plan.Summary.Unchanged = append(plan.Summary.Unchanged, op.RelPath)
+			return nextRec, true, mergedBytes, nil
+		} else {
+			plan.Summary.Updated = append(plan.Summary.Updated, op.RelPath)
+		}
+
+		plan.Actions = append(plan.Actions, PlannedAction{
+			Target:        targetLabel,
+			RelPath:       op.RelPath,
+			Type:          ActionWriteFile,
+			Content:       mergedBytes,
+			OldContent:    oldContent,
+			OldKind:       oldKind,
+			OldLinkTarget: oldLinkTarget,
+			Mode:          0o644,
+			NeedsBackup:   needsBackup && exists,
+			Record:        nextRec,
+		})
+		return nextRec, true, mergedBytes, nil
+
 	case adapters.OpManagedBlock:
 		var existing []byte
 		exists := false
@@ -769,6 +816,34 @@ func planPruneArtifact(projectRoot, targetLabel, oldRel string, oldRec ArtifactR
 		}
 		if err == nil {
 			updatedBytes, deleteFile, rerr := RemoveJSONC(curBytes, oldRec)
+			if rerr != nil {
+				return rerr
+			}
+			if !deleteFile {
+				plan.Summary.Updated = append(plan.Summary.Updated, oldRel)
+				plan.PruneOps = append(plan.PruneOps, PlannedAction{
+					Target:        targetLabel,
+					RelPath:       oldRel,
+					Type:          ActionWriteFile,
+					Content:       updatedBytes,
+					OldContent:    oldContent,
+					OldKind:       oldKind,
+					OldLinkTarget: oldLinkTarget,
+					Mode:          0o644,
+				})
+				return nil
+			}
+		}
+	}
+
+	if oldRec.ArtifactType == TypeTOMLPatch {
+		curBytes := oldContent
+		var err error
+		if curBytes == nil {
+			curBytes, err = os.ReadFile(absOld)
+		}
+		if err == nil {
+			updatedBytes, deleteFile, rerr := RemoveTOML(curBytes, oldRec)
 			if rerr != nil {
 				return rerr
 			}
