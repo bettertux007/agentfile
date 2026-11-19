@@ -1,8 +1,8 @@
 # agentfile
 
-Declarative project compiler and dependency hydrator for AI coding agents (**Claude Code**, **OpenCode**, **Gemini CLI**, and **Cursor**).
+Declarative project compiler and dependency hydrator for AI coding agents (**Claude Code**, **OpenCode**, **Gemini CLI**, **Cursor**, **Codex CLI**, **GitHub Copilot**, and **Windsurf**).
 
-Define project-scoped MCP servers, skills, subagents, instructions, permissions, and lifecycle hooks once in `Agentfile.yaml` (`version: 1`). `agentfile` resolves remote Git dependencies into a local cache tracked by `Agentfile.lock` (`version: 1`) and compiles isolated, project-level configurations for each target agent without mutating global config files (`~/.claude.json`, `~/.config/opencode/`, `~/.gemini/settings.json`, `~/.cursor/`).
+Define project-scoped MCP servers, skills, subagents, instructions, permissions, and lifecycle hooks once in `Agentfile.yaml` (`version: 1`). `agentfile` resolves remote Git dependencies into a local cache tracked by `Agentfile.lock` (`version: 1`) and compiles isolated, project-level configurations for each target agent without mutating global config files (`~/.claude.json`, `~/.config/opencode/`, `~/.gemini/settings.json`, `~/.cursor/`, `~/.codex/`, `~/.copilot/`, `~/.codeium/windsurf/`, `~/.agents/skills/`).
 
 ## Quickstart
 
@@ -10,7 +10,7 @@ Define project-scoped MCP servers, skills, subagents, instructions, permissions,
 # Build and install locally
 make install
 
-# 1. Scaffold Agentfile.yaml (detects targets on $PATH)
+# 1. Scaffold Agentfile.yaml (detects targets on $PATH, or use --import to migrate existing configs)
 agentfile init
 
 # 2. Preview planned changes without touching disk
@@ -38,7 +38,7 @@ See [examples/starter/README.md](examples/starter/README.md) and [examples/start
 
 | Command | Flags | Description |
 | :--- | :--- | :--- |
-| `agentfile init` | `--minimal`, `--full`, `--force` | Scaffolds `Agentfile.yaml` with targets detected on `$PATH`. |
+| `agentfile init` | `--minimal`, `--full`, `--import`, `--targets`, `--dry-run`, `--json`, `--force` | Scaffolds `Agentfile.yaml` from detected targets on `$PATH`, or with `--import` reverse-compiles existing repo configs into `./.agentfile/imported/` and `Agentfile.yaml`. |
 | `agentfile sync` | `--targets`, `--link-mode`, `--copy`, `--on-conflict`, `--git-exclude`, `--update[=<kind:name>]`, `--dry-run`, `--force`, `--allow-external-local`, `--json` | Resolves dependencies, verifies `Agentfile.lock`, compiles target configs, prints lock deltas on `--update`, and updates worktree Git excludes. |
 | `agentfile status` | `--targets`, `--check`, `--json` | Read-only check of manifest validity, lockfile alignment, config sources, dependency hydration, workspace drift, conflicts, and per-target isolation. |
 | `agentfile diff` | `--targets`, `--stat`, `--name-only`, `--check`, `--fetch` | Previews secret-redacted unified diffs (or diffstat/paths) between `Agentfile.yaml` and workspace files without modifying disk or `Agentfile.lock`. |
@@ -74,27 +74,30 @@ Agentfile.yaml ──► spec.Parse ──► ir.Build (EnvRef + Security Tiers)
                                                                                │
 Agentfile.lock ──► store.Resolve (locks / --update) ───────────────────────────┤
                                                                                ▼
-.agentfile/config.yaml + CLI flags + probes ──► engine.Plan (JSONC/Markdown 3-way merge,
+.agentfile/config.yaml + CLI flags + probes ──► engine.Plan (JSONC/TOML/Markdown 3-way merge,
                                                              post-merge policy check)
                                                        │
                                                        ▼
                                                 engine.Commit (commit-journal rollback,
-                                                               state.json v1, vcs.Exclude)
+                                                               state.json v1 + shared owners, vcs.Exclude)
 ```
 
 * **Zero Global Mutation:** Never writes to user-global agent directories. Local store/cache lives solely under `AGENTFILE_CACHE_DIR` or `<UserCacheDir>/agentfile/`.
-* **Translated Env Refs:** `${VAR}` and `${VAR:-default}` are tokenized into IR segments and lowered per target (`${VAR}` for Claude/Gemini, `{env:VAR}` for OpenCode, `${env:VAR}` for Cursor).
+* **Translated Env Refs:** `${VAR}` and `${VAR:-default}` are tokenized into IR segments and lowered per target (`${VAR}` for Claude/Gemini, `{env:VAR}` for OpenCode, `${env:VAR}` for Cursor/Copilot, and `env_vars` / `env_http_headers` / `bearer_token_env_var` for Codex).
 * **Fail-Closed Security:** Unsupported `deny_commands` or enforced `hooks` (`PreToolUse` or `enforce: true`) fail compilation (exit `2`) unless `targets_config.<target>.on_unsupported: warn` is explicitly set.
-* **Non-Destructive Coexistence:** Uses drop-in rule files where supported, `hujson` comment-preserving 3-way JSONC patching (`SetEscapeHTML(false)`), fenced-code-aware Markdown blocks, and worktree-keyed `<git-common-dir>/info/exclude` entries.
+* **Non-Destructive Coexistence & Shared Ownership:** Uses drop-in rule files where supported, `hujson` comment-preserving 3-way JSONC patching (`SetEscapeHTML(false)`), `go-toml/v2` 3-way TOML patching (`.codex/config.toml`), fenced-code-aware Markdown blocks, reference-counted shared ownership (`AGENTS.md`, `.agents/skills/<name>`), and worktree-keyed `<git-common-dir>/info/exclude` entries that keep `.agentfile/imported/` trackable in Git.
 
 ## Target Matrix
 
-| Target | Outputs | Env Syntax |
-| :--- | :--- | :--- |
-| `claude` | `.mcp.json`, `.claude/settings.json`, `.claude/skills/`, `.claude/agents/`, `.claude/rules/agentfile-*.md` | `${VAR}` / `${VAR:-default}` |
-| `opencode` | `opencode.json`, `.opencode/skills/`, `.opencode/agents/`, `.opencode/agentfile-rules.md` | `{env:VAR}` |
-| `gemini` | `.gemini/settings.json`, `.gemini/skills/`, `GEMINI.md` managed block | `${VAR}` |
-| `cursor` | `.cursor/mcp.json`, `.cursor/rules/agentfile-*.mdc` | `${env:VAR}` |
+| Target | Outputs | `rules_mode` | Env Syntax |
+| :--- | :--- | :--- | :--- |
+| `claude` | `.mcp.json`, `.claude/settings.json`, `.claude/skills/`, `.claude/agents/`, `.claude/rules/agentfile-*.md` | drop-in | `${VAR}` / `${VAR:-default}` |
+| `opencode` | `opencode.json`, `.opencode/skills/`, `.opencode/agents/`, `.opencode/agentfile-rules.md` | single file | `{env:VAR}` |
+| `gemini` | `.gemini/settings.json`, `.gemini/skills/`, `GEMINI.md` managed block | managed block | `${VAR}` |
+| `cursor` | `.cursor/mcp.json`, `.cursor/rules/agentfile-*.mdc` | drop-in | `${env:VAR}` |
+| `codex` | `.codex/config.toml`, `.agents/skills/` (shared), `AGENTS.md` managed block (shared) | `agents_md` (default) | `env_vars` / `env_http_headers` / `bearer_token_env_var` |
+| `copilot` | `.vscode/mcp.json`, `.agents/skills/` (shared), `.github/copilot-instructions.md` or `AGENTS.md` (shared) | `copilot` (default) \| `agents_md` | `${env:VAR}` |
+| `windsurf` | `.windsurf/rules/agentfile-*.md` or `AGENTS.md` (shared), `.agents/skills/` (shared); no project MCP (`PROJECT_MCP_UNSUPPORTED` warning) | `dropin` (default) \| `agents_md` | N/A |
 
 ## Further Documentation
 

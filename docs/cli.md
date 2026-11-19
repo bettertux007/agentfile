@@ -14,21 +14,26 @@
 
 ## `agentfile init`
 
-Scaffolds `Agentfile.yaml` in the current working directory and probes `$PATH` for installed targets (`claude`, `opencode`, `gemini`, `cursor`; defaults to `[claude, opencode]` if none are found).
+Scaffolds `Agentfile.yaml` in the current working directory and probes `$PATH` for installed targets (`claude`, `opencode`, `gemini`, `cursor`, `codex`, `copilot`, `windsurf`; defaults to `[claude, opencode]` if none are found). With `--import`, reverse-compiles existing repository-local agent configurations into `./.agentfile/imported/` and `Agentfile.yaml`.
 
 ```sh
 agentfile init [--minimal | --full] [--force]
+agentfile init --import [--targets <list>] [--force] [--dry-run] [--json]
 ```
 
-* `--minimal`: Minimal `version: 1` and `targets` template (default).
+* `--minimal`: Minimal `version: 1` and `targets` template (default when `--import` is not set).
 * `--full`: Includes starter `mcp`, `settings`, and commented `skills` / `agents` / `rules` sections.
-* `--force`: Overwrite an existing `Agentfile.yaml` (otherwise exits `2`).
+* `--force`: Overwrite an existing `Agentfile.yaml` (otherwise exits `2`). With `--import`, also atomically replaces `./.agentfile/imported/`.
+* `--import`: Scan existing repo-local configurations across all 7 targets (`.mcp.json`, `opencode.json`, `.gemini/settings.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.codex/config.toml`, `.claude/settings.json`, skills under `.claude/skills/`, `.opencode/skills/`, `.gemini/skills/`, `.agents/skills/`, agents under `.claude/agents/`, `.opencode/agents/`, and rules under `.claude/rules/*.md`, `.cursor/rules/*.mdc`, `.windsurf/rules/*.md`, `.opencode/agentfile-rules.md`, `GEMINI.md`, `AGENTS.md`, `.github/copilot-instructions.md`), extract skills/agents/rules into `./.agentfile/imported/{skills,agents,rules}/`, normalize `{env:VAR}` and `${env:VAR}` back to `${VAR}`, and write `Agentfile.yaml`. Rejects divergent definitions, literal secrets, or empty discovery with exit `2`. Cannot be combined with `--minimal` or `--full`.
+* `--targets <list>`: Comma-separated list of targets for the generated `Agentfile.yaml` (requires `--import`). When omitted, targets are inferred from discovered configurations (defaulting to `codex` if only shared `.agents/skills/` or `AGENTS.md` artifacts are found).
+* `--dry-run`: Preview the import summary and generated `Agentfile.yaml` without writing `./.agentfile/imported/` or `Agentfile.yaml` (requires `--import`).
+* `--json`: Emit an `ImportSummary` JSON object (`dry_run`, `targets`, `sources_scanned`, `mcp`, `skills`, `agents`, `rules`, `allow_commands`, `deny_commands`, `hooks`, `imported_files`, `manifest_yaml`; requires `--import`).
 
 ---
 
 ## `agentfile sync`
 
-Resolves dependencies, validates `Agentfile.lock`, compiles active targets, runs post-merge policy checks, updates `.agentfile/state.json`, and manages worktree-safe excludes in `<git-common-dir>/info/exclude`.
+Resolves dependencies, validates `Agentfile.lock`, compiles active targets, runs post-merge policy checks, updates `.agentfile/state.json` (including `shared` and `shared_owned_dirs` ownership for co-owned artifacts such as `AGENTS.md` and `.agents/skills/<name>`), and manages worktree-safe excludes in `<git-common-dir>/info/exclude` (excluding `.agentfile/{state.json,config.yaml,sync.lock,commit-journal.json,backups/}` and unmanaged compiled outputs while keeping `.agentfile/imported/` trackable in Git).
 
 ```sh
 agentfile sync [flags]
@@ -49,7 +54,7 @@ agentfile sync [flags]
 
 ## `agentfile status`
 
-Performs a read-only inspection of `Agentfile.yaml`, `Agentfile.lock`, resolved configuration (`.agentfile/config.yaml` and user-global config), local/remote dependency hydration, `.agentfile/commit-journal.json` state, workspace drift, unmanaged/edited conflicts, and per-target `load_global`/isolation status without invoking Git or mutating files.
+Performs a read-only inspection of `Agentfile.yaml`, `Agentfile.lock`, resolved configuration (`.agentfile/config.yaml` and user-global config), local/remote dependency hydration, `.agentfile/commit-journal.json` state, workspace drift (including shared artifacts attributed to every owning target), unmanaged/edited conflicts, and per-target `load_global`/isolation status without invoking Git or mutating files.
 
 ```sh
 agentfile status [--targets <list>] [--check] [--json]
@@ -143,7 +148,7 @@ agentfile upgrade [<kind>:<name> | <kind> <name>] [flags]
 
 ## `agentfile doctor`
 
-Validates `Agentfile.yaml` against the embedded JSON Schema v1 (`schemas/v1/agentfile.schema.json`) and `spec.ParseFile`, checks `Agentfile.lock`, probes installed target CLIs against `SchemaContract` (`MinVersion` and `MinIsolationVersion`), displays the resolved `.agentfile/config.yaml` and user-global config (`~/.config/agentfile/config.yaml` when active) with per-field provenance and per-target `load_global`/`isolation_mode` state, and inspects user-global configs read-only (`~/.claude.json`, `~/.claude/{skills,agents,rules,CLAUDE.md}`, `~/.config/opencode/`, `~/.agents/skills`, `~/.gemini/`, `~/.cursor/`) for shadowing MCP servers and non-empty global skills/rules/agents.
+Validates `Agentfile.yaml` against the embedded JSON Schema v1 (`schemas/v1/agentfile.schema.json`) and `spec.ParseFile`, checks `Agentfile.lock`, probes installed target CLIs against `SchemaContract` (`MinVersion` and `MinIsolationVersion`), displays the resolved `.agentfile/config.yaml` and user-global config (`~/.config/agentfile/config.yaml` when active) with per-field provenance and per-target `load_global`/`isolation_mode` state, and inspects user-global configs read-only (`~/.claude.json`, `~/.claude/{skills,agents,rules,CLAUDE.md}`, `~/.config/opencode/`, `~/.agents/skills`, `~/.gemini/`, `~/.cursor/`, `~/.codex/{config.toml,AGENTS.md}`, `~/.copilot/{skills,mcp-config.json}`, `~/.codeium/windsurf/{mcp_config.json,memories/global_rules.md}`) for shadowing MCP servers and non-empty global skills/rules/agents.
 
 ```sh
 agentfile doctor [--json]
@@ -172,7 +177,7 @@ agentfile run [flags] <target> [target-args...]
 
 ## `agentfile clean`
 
-Removes workspace artifacts tracked in `.agentfile/state.json`, strips managed JSONC keys/array entries and Markdown blocks without deleting user-authored content, removes empty `owned_dirs`, and clears this worktree's exclude block.
+Removes workspace artifacts tracked in `.agentfile/state.json`, strips managed JSONC keys/array entries, TOML keys/tables, and Markdown blocks without deleting user-authored content, removes empty `owned_dirs` and `shared_owned_dirs`, and clears this worktree's exclude block. Shared artifacts (`AGENTS.md`, `.agents/skills/<name>`) are reference-counted across owning targets: `--targets <list>` removes only the named target(s) from `owners` and preserves the shared artifact on disk while at least one other target still owns it.
 
 ```sh
 agentfile clean [--dry-run] [--targets <list>] [--cache [--max-age <duration>]] [--json]
