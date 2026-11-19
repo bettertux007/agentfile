@@ -409,9 +409,6 @@ func Clean(projectRoot string, targets []string, dryRun bool) (*PlanSummary, err
 			}
 			summary.Warnings = append(summary.Warnings, w...)
 		} else {
-			if err := SaveState(projectRoot, st); err != nil {
-				return nil, err
-			}
 			remainingSet := make(map[string]bool)
 			for _, ts := range st.Targets {
 				for rel := range ts.Artifacts {
@@ -426,6 +423,12 @@ func Clean(projectRoot string, targets []string, dryRun bool) (*PlanSummary, err
 				remaining = append(remaining, rel)
 			}
 			sort.Strings(remaining)
+			st.ExcludeFingerprint = hashBytes([]byte(fmt.Sprintf(
+				"git_exclude=%t\n%s", true, strings.Join(remaining, "\n"),
+			)))
+			if err := SaveState(projectRoot, st); err != nil {
+				return nil, err
+			}
 			w, err := vcs.SyncExcludes(projectRoot, remaining, true)
 			if err != nil {
 				return nil, err

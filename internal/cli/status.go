@@ -485,7 +485,7 @@ func verifyTargetStateOnDisk(projectRoot string, st *engine.State, target string
 			continue
 		}
 		switch rec.ArtifactType {
-		case engine.TypeFile, engine.TypeJSONCPatch, engine.TypeMarkdownBlock:
+		case engine.TypeFile, engine.TypeJSONCPatch, engine.TypeMarkdownBlock, engine.TypeTOMLPatch:
 			if !info.Mode().IsRegular() {
 				drifted = append(drifted, rel)
 				continue

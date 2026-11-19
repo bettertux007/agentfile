@@ -36,6 +36,9 @@ func newInitCmd(ec *execContext) *cobra.Command {
 			}
 
 			if importMode {
+				if cmd.Flags().Changed("targets") && len(targets) == 0 {
+					return spec.NewPolicyError("target name in --targets cannot be empty")
+				}
 				return runInitImport(ec, targets, force, dryRun, jsonOut)
 			}
 

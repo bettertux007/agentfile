@@ -94,7 +94,7 @@ Agentfile.lock ──► store.Resolve (locks / --update) ───────�
 | `claude` | `.mcp.json`, `.claude/settings.json`, `.claude/skills/`, `.claude/agents/`, `.claude/rules/agentfile-*.md` | drop-in | `${VAR}` / `${VAR:-default}` |
 | `opencode` | `opencode.json`, `.opencode/skills/`, `.opencode/agents/`, `.opencode/agentfile-rules.md` | single file | `{env:VAR}` |
 | `gemini` | `.gemini/settings.json`, `.gemini/skills/`, `GEMINI.md` managed block | managed block | `${VAR}` |
-| `cursor` | `.cursor/mcp.json`, `.cursor/rules/agentfile-*.mdc` | drop-in | `${env:VAR}` |
+| `cursor` | `.cursor/mcp.json`, `.cursor/rules/agentfile-*.mdc`, `.cursor/rules/agentfile-skill-*.mdc` | drop-in | `${env:VAR}` |
 | `codex` | `.codex/config.toml`, `.agents/skills/` (shared), `AGENTS.md` managed block (shared) | `agents_md` (default) | `env_vars` / `env_http_headers` / `bearer_token_env_var` |
 | `copilot` | `.vscode/mcp.json`, `.agents/skills/` (shared), `.github/copilot-instructions.md` or `AGENTS.md` (shared) | `copilot` (default) \| `agents_md` | `${env:VAR}` |
 | `windsurf` | `.windsurf/rules/agentfile-*.md` or `AGENTS.md` (shared), `.agents/skills/` (shared); no project MCP (`PROJECT_MCP_UNSUPPORTED` warning) | `dropin` (default) \| `agents_md` | N/A |

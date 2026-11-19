@@ -23,11 +23,11 @@ Committed at the repository root. Unknown YAML fields and multi-document YAML st
   * `on_unsupported`: `fail` (default for enforced security controls, unsupported `rules_mode`, unsupported MCP transports such as Codex `sse`, and unsupported env default modifiers) or `warn` (downgrade to warning and omit unsupported items or strip env defaults).
   * `load_global`: Boolean (`true` default). When `false`, `agentfile run <target>` enforces native global-config isolation (`claude` uses `--setting-sources project,local --strict-mcp-config --mcp-config ...`; `opencode` uses `OPENCODE_CONFIG_DIR=<CacheRoot>/empty-opencode-config`, `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1`, and `--standalone`). Targets without safe CLI global isolation (`codex`, `copilot`, `windsurf`, `cursor`, and partial `gemini`) fail closed unless `on_isolation_unsupported: warn` is set.
   * `on_isolation_unsupported`: `fail` (default) or `warn` (degrade to `partial_warn` when full global isolation is unsupported on a target or when `~/.claude/skills` or `~/.agents/skills` is non-empty).
-  * `rules_mode`: Rule emission mode per target (invalid values emit `UNSUPPORTED_RULES_MODE`):
+  * `rules_mode`: Rule emission mode per target (JSON Schema v1 and `spec.Parse` allow `dropin`, `agents_md`, or `copilot`; values outside that set fail schema/parse validation, while target-incompatible values from that set emit `UNSUPPORTED_RULES_MODE` on `codex`, `copilot`, and `windsurf` and fail closed unless `on_unsupported: warn` is set):
     * `codex`: `agents_md` (default / only supported value) -> shared `AGENTS.md` managed block.
     * `copilot`: `copilot` (default) -> `.github/copilot-instructions.md` managed block; or `agents_md` -> shared `AGENTS.md` managed block.
     * `windsurf`: `dropin` (default) -> `.windsurf/rules/agentfile-<name>.md` (`trigger: always_on` or `trigger: glob` with `globs`); or `agents_md` -> shared `AGENTS.md` managed block.
-    * `claude`, `opencode`, `gemini`, `cursor` always emit their native formats (`.claude/rules/agentfile-*.md`, `.opencode/agentfile-rules.md`, `GEMINI.md` managed block, `.cursor/rules/agentfile-*.mdc`).
+    * `claude`, `opencode`, `gemini`, `cursor` always emit their native formats (`.claude/rules/agentfile-*.md`, `.opencode/agentfile-rules.md`, `GEMINI.md` managed block, `.cursor/rules/agentfile-*.mdc`) and ignore `rules_mode`.
   * `overrides`: Map of target-specific keys merged into that target's JSON/JSONC config file or `.codex/config.toml` (for `codex`; e.g., `approval_policy`, `sandbox_mode`, or dotted keys). Note: `codex` rejects `approval_policy: "never"` or `sandbox_mode: "danger-full-access"` in post-merge `CheckPolicy` when `deny_commands` is declared.
 
 ### Dependency Source Syntax
@@ -61,7 +61,7 @@ Committed at the repository root. Unknown YAML fields and multi-document YAML st
 | `claude` | `.mcp.json`, `.claude/settings.json`, `.claude/skills/<name>`, `.claude/agents/<name>.md`, `.claude/rules/agentfile-<name>.md` | drop-in (fixed) |
 | `opencode` | `opencode.json`, `.opencode/skills/<name>`, `.opencode/agents/<name>.md`, `.opencode/agentfile-rules.md` | single file (fixed) |
 | `gemini` | `.gemini/settings.json`, `.gemini/skills/<name>`, `GEMINI.md` (managed block) | managed block (fixed) |
-| `cursor` | `.cursor/mcp.json`, `.cursor/rules/agentfile-<name>.mdc` | drop-in (fixed) |
+| `cursor` | `.cursor/mcp.json`, `.cursor/rules/agentfile-<name>.mdc`, `.cursor/rules/agentfile-skill-<name>.mdc` | drop-in (fixed) |
 | `codex` | `.codex/config.toml` (3-way TOML), `.agents/skills/<name>` (shared), `AGENTS.md` (shared managed block) | `agents_md` (default) |
 | `copilot` | `.vscode/mcp.json` (`/servers/<name>`), `.agents/skills/<name>` (shared), `.github/copilot-instructions.md` or `AGENTS.md` (shared) | `copilot` (default) \| `agents_md` |
 | `windsurf` | `.windsurf/rules/agentfile-<name>.md` or `AGENTS.md` (shared), `.agents/skills/<name>` (shared); no project MCP | `dropin` (default) \| `agents_md` |
@@ -109,7 +109,7 @@ load_global: true     # true (default) | false (machine-local runtime isolation 
 
 1. **Built-in defaults:** `link_mode: copy`, `git_exclude: true`, and `on_conflict: ask` (in interactive non-CI TTYs) or `fail` (in non-TTY or CI environments).
 2. **User-global config:** `~/.config/agentfile/config.yaml` (personal defaults across repositories).
-3. **Repo-local config:** `.agentfile/config.yaml` (excluded from Git via `<git-common-dir>/info/exclude` when `git_exclude: true`, alongside `.agentfile/{state.json,sync.lock,commit-journal.json,backups/}` and unmanaged compiled outputs; `.agentfile/imported/` is intentionally **not** excluded so imported assets can be committed).
+3. **Repo-local config:** `.agentfile/config.yaml` (excluded from Git via `<git-common-dir>/info/exclude` when `git_exclude: true`, alongside `.agentfile/{state.json,sync.lock,commit-journal.json,backups/}` and untracked compiled outputs; `.agentfile/imported/` is intentionally **not** excluded so imported assets can be committed).
 4. **CLI flags:** `--link-mode`, `--copy`, `--on-conflict`, `--force`, and `--git-exclude`.
 
 Note: Setting `on_conflict: overwrite` in the user-global config emits a warning because unmanaged local edits may be overwritten without prompting.

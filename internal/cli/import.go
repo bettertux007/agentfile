@@ -81,12 +81,15 @@ type importedAgent struct {
 }
 
 type importedRule struct {
-	Name        string
-	Description string
-	Globs       []string
-	AlwaysApply bool
-	Body        string
-	Source      string
+	Name                   string
+	Description            string
+	Globs                  []string
+	AlwaysApply            bool
+	HasExplicitDescription bool
+	HasExplicitGlobs       bool
+	HasExplicitAlwaysApply bool
+	Body                   string
+	Source                 string
 }
 
 type importedHook struct {
@@ -758,9 +761,15 @@ func parseCodexMCP(relPath, name string, entry map[string]any) (importedMCP, err
 		}
 		if bearerVar != "" {
 			authVal := "Bearer ${" + bearerVar + "}"
-			for k, prev := range hdrs {
-				if strings.EqualFold(k, "Authorization") && prev != authVal {
+			for _, k := range sortedStringMapKeys(hdrs) {
+				if !strings.EqualFold(k, "Authorization") {
+					continue
+				}
+				if hdrs[k] != authVal {
 					return importedMCP{}, spec.NewPolicyError("%s: mcp_servers.%s defines conflicting Authorization header and bearer_token_env_var", relPath, name)
+				}
+				if k != "Authorization" {
+					delete(hdrs, k)
 				}
 			}
 			hdrs["Authorization"] = authVal
@@ -1117,6 +1126,13 @@ func (c *importCollector) scanRuleDir(relRoot, ext, flavor, target string) error
 		if err != nil {
 			return err
 		}
+		if flavor == "cursor" && strings.HasPrefix(base, "agentfile-skill-") {
+			skillStem := strings.TrimPrefix(base, "agentfile-skill-")
+			if skillStem != "" && rl.Description == "Skill: "+skillStem && !rl.AlwaysApply && len(rl.Globs) == 0 {
+				c.markTarget(target, false)
+				continue
+			}
+		}
 		c.recordSource(relFile)
 		if err := c.addRule(rl); err != nil {
 			return err
@@ -1137,22 +1153,37 @@ func parseDropInRule(relFile, slug, flavor, raw string) (importedRule, error) {
 			Description      string `yaml:"description"`
 			Globs            any    `yaml:"globs"`
 			Paths            any    `yaml:"paths"`
-			AlwaysApply      bool   `yaml:"alwaysApply"`
-			AlwaysApplySnake bool   `yaml:"always_apply"`
+			AlwaysApply      *bool  `yaml:"alwaysApply"`
+			AlwaysApplySnake *bool  `yaml:"always_apply"`
 			Trigger          string `yaml:"trigger"`
 		}
 		if err := yaml.Unmarshal([]byte(fmYAML), &fm); err != nil {
 			return importedRule{}, spec.NewPolicyError("%s: invalid YAML frontmatter: %v", relFile, err)
 		}
 		rl.Description = strings.TrimSpace(fm.Description)
-		rl.AlwaysApply = fm.AlwaysApply || fm.AlwaysApplySnake
-		if flavor == "windsurf" && strings.EqualFold(strings.TrimSpace(fm.Trigger), "always_on") {
-			rl.AlwaysApply = true
-		}
+		rl.HasExplicitDescription = rl.Description != ""
 		if fm.Globs != nil {
 			rl.Globs = parseGlobList(fm.Globs)
 		} else if fm.Paths != nil {
 			rl.Globs = parseGlobList(fm.Paths)
+		}
+		rl.HasExplicitGlobs = len(rl.Globs) > 0
+		switch {
+		case fm.AlwaysApply != nil:
+			rl.AlwaysApply = *fm.AlwaysApply
+			rl.HasExplicitAlwaysApply = true
+		case fm.AlwaysApplySnake != nil:
+			rl.AlwaysApply = *fm.AlwaysApplySnake
+			rl.HasExplicitAlwaysApply = true
+		case flavor == "windsurf":
+			switch strings.ToLower(strings.TrimSpace(fm.Trigger)) {
+			case "always_on":
+				rl.AlwaysApply = true
+				rl.HasExplicitAlwaysApply = false
+			case "glob":
+				rl.AlwaysApply = false
+				rl.HasExplicitAlwaysApply = true
+			}
 		}
 	}
 	rl.Body = normalizeMarkdownBody(body)
@@ -1284,11 +1315,13 @@ func parseMultiSectionRules(relFile, content, fallbackSlug string) ([]importedRu
 			continue
 		}
 		out = append(out, importedRule{
-			Name:        slug,
-			Description: desc,
-			Globs:       globs,
-			Body:        body,
-			Source:      relFile,
+			Name:                   slug,
+			Description:            desc,
+			Globs:                  globs,
+			HasExplicitDescription: desc != "",
+			HasExplicitGlobs:       len(globs) > 0,
+			Body:                   body,
+			Source:                 relFile,
 		})
 	}
 	return out, nil
@@ -1337,16 +1370,42 @@ func parseBacktickOrCSVGlobs(raw string) []string {
 }
 
 func (c *importCollector) addRule(rl importedRule) error {
-	if prev, exists := c.rules[rl.Name]; exists {
-		if prev.Description != rl.Description ||
-			prev.AlwaysApply != rl.AlwaysApply ||
-			!slices.Equal(prev.Globs, rl.Globs) ||
-			prev.Body != rl.Body {
-			return spec.NewPolicyError("divergent definitions for rule %q between %s and %s", rl.Name, prev.Source, rl.Source)
-		}
+	prev, exists := c.rules[rl.Name]
+	if !exists {
+		c.rules[rl.Name] = rl
 		return nil
 	}
-	c.rules[rl.Name] = rl
+	if prev.Body != rl.Body {
+		return spec.NewPolicyError("divergent definitions for rule %q between %s and %s", rl.Name, prev.Source, rl.Source)
+	}
+	if prev.HasExplicitDescription && rl.HasExplicitDescription && prev.Description != rl.Description {
+		return spec.NewPolicyError("divergent definitions for rule %q between %s and %s", rl.Name, prev.Source, rl.Source)
+	}
+	if prev.HasExplicitGlobs && rl.HasExplicitGlobs && !slices.Equal(prev.Globs, rl.Globs) {
+		return spec.NewPolicyError("divergent definitions for rule %q between %s and %s", rl.Name, prev.Source, rl.Source)
+	}
+	if prev.HasExplicitAlwaysApply && rl.HasExplicitAlwaysApply && prev.AlwaysApply != rl.AlwaysApply {
+		return spec.NewPolicyError("divergent definitions for rule %q between %s and %s", rl.Name, prev.Source, rl.Source)
+	}
+
+	if !prev.HasExplicitDescription && rl.HasExplicitDescription {
+		prev.Description = rl.Description
+		prev.HasExplicitDescription = true
+	}
+	if !prev.HasExplicitGlobs && rl.HasExplicitGlobs {
+		prev.Globs = append([]string(nil), rl.Globs...)
+		prev.HasExplicitGlobs = true
+	}
+	switch {
+	case prev.HasExplicitAlwaysApply:
+		// Keep explicit AlwaysApply from prev.
+	case rl.HasExplicitAlwaysApply:
+		prev.AlwaysApply = rl.AlwaysApply
+		prev.HasExplicitAlwaysApply = true
+	default:
+		prev.AlwaysApply = prev.AlwaysApply || rl.AlwaysApply
+	}
+	c.rules[rl.Name] = prev
 	return nil
 }
 
@@ -1659,7 +1718,13 @@ func copyImportDir(src, dst string) error {
 }
 
 func normalizeEnvSyntax(s string) string {
-	return reForeignEnvVar.ReplaceAllString(s, `${$1}`)
+	return reForeignEnvVar.ReplaceAllStringFunc(s, func(match string) string {
+		sub := reForeignEnvVar.FindStringSubmatch(match)
+		if len(sub) != 2 {
+			return match
+		}
+		return "${" + sub[1] + "}"
+	})
 }
 
 func sanitizeSlug(raw string) (string, error) {

@@ -342,3 +342,83 @@ func TestStateCloneAndEqualForTOMLFields(t *testing.T) {
 		t.Fatalf("expected recordsEqual=false when TOML fields differ")
 	}
 }
+
+func TestParseTOMLPathAndDottedServerNames(t *testing.T) {
+	t.Parallel()
+
+	// Valid path parsing (unquoted, quoted dotted, escaped quotes/backslashes).
+	good := []struct {
+		in   string
+		want []string
+	}{
+		{"mcp_servers.github", []string{"mcp_servers", "github"}},
+		{`mcp_servers."acme.github"`, []string{"mcp_servers", "acme.github"}},
+		{`mcp_servers."a\"b\\c".url`, []string{"mcp_servers", `a"b\c`, "url"}},
+	}
+	for _, tc := range good {
+		got, err := parseTOMLPath(tc.in)
+		if err != nil {
+			t.Fatalf("parseTOMLPath(%q) unexpected error: %v", tc.in, err)
+		}
+		if len(got) != len(tc.want) {
+			t.Fatalf("parseTOMLPath(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("parseTOMLPath(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
+			}
+		}
+	}
+
+	// Invalid paths must return PolicyError.
+	bad := []string{
+		"",
+		".mcp_servers",
+		"mcp_servers.",
+		"mcp_servers..github",
+		`mcp_servers."unterminated`,
+		`mcp_servers."foo"bar`,
+		`mcp_servers.foo"bar`,
+	}
+	for _, p := range bad {
+		if _, err := parseTOMLPath(p); err == nil {
+			t.Fatalf("parseTOMLPath(%q) expected error, got nil", p)
+		}
+	}
+
+	// MergeTOML + RemoveTOML with dotted MCP server name mcp_servers."acme.github".
+	ms := &adapters.TOMLMergeSpec{
+		TableEntries: map[string]any{
+			`mcp_servers."acme.github"`: map[string]any{
+				"url": "https://acme.example.com/mcp",
+			},
+		},
+	}
+	out, rec, _, err := MergeTOML(nil, false, ms, nil, nil)
+	if err != nil {
+		t.Fatalf("MergeTOML dotted failed: %v", err)
+	}
+	var doc map[string]any
+	if err := toml.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("invalid TOML output: %v\n%s", err, out)
+	}
+	mcps := doc["mcp_servers"].(map[string]any)
+	srv, ok := mcps["acme.github"].(map[string]any)
+	if !ok || srv["url"] != "https://acme.example.com/mcp" {
+		t.Fatalf("expected single key acme.github under mcp_servers (not nested acme.github), got %+v\n%s", mcps, out)
+	}
+
+	// Idempotent resync.
+	out2, _, _, err := MergeTOML(out, true, ms, &rec, func(detail string) (bool, bool, error) {
+		return false, false, spec.NewPolicyError("unexpected conflict: %s", detail)
+	})
+	if err != nil || string(out2) != string(out) {
+		t.Fatalf("expected idempotent dotted TOML resync, err=%v\nout1:\n%s\nout2:\n%s", err, out, out2)
+	}
+
+	// RemoveTOML cleans up dotted key and empty file.
+	_, del, err := RemoveTOML(out, rec)
+	if err != nil || !del {
+		t.Fatalf("expected RemoveTOML deleteFile=true, got del=%v err=%v", del, err)
+	}
+}

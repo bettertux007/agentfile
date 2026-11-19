@@ -195,8 +195,7 @@ func (a *Adapter) Compile(bundle *ir.Bundle, _ adapters.ProbeResults) (*adapters
 				}
 			}
 
-			// Note: engine/toml.go splits TableEntries keys on '.'; standard slugs without '.' map cleanly here.
-			tableEntries["mcp_servers."+srv.Name] = entry
+			tableEntries["mcp_servers."+quoteTOMLKeySegment(srv.Name)] = entry
 		}
 
 		if len(tcfg.Overrides) > 0 {
@@ -502,4 +501,23 @@ func extractBearerEnvRef(es spec.EnvString) (*spec.EnvRef, bool) {
 		return es.Segments[1].Var, true
 	}
 	return nil, false
+}
+
+func quoteTOMLKeySegment(seg string) string {
+	if seg != "" {
+		bareOK := true
+		for i := 0; i < len(seg); i++ {
+			c := seg[i]
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+				bareOK = false
+				break
+			}
+		}
+		if bareOK {
+			return seg
+		}
+	}
+	escaped := strings.ReplaceAll(seg, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
 }

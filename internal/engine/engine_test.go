@@ -1611,3 +1611,60 @@ func TestOpMergeTOMLPlanCommitPruneAndClean(t *testing.T) {
 		t.Fatalf("expected agentfile-created .codex/config.toml deleted by Clean")
 	}
 }
+
+func TestCleanSubsetUpdatesExcludeFingerprint(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	cfg := &config.EffectiveConfig{LinkMode: "copy", OnConflict: "fail", GitExclude: true}
+	resCodex := &adapters.CompileResult{
+		Target: "codex",
+		Files: []adapters.ArtifactOp{
+			{Target: "codex", RelPath: ".codex/config.toml", Kind: adapters.OpWriteDropIn, Content: []byte("model = 'o3'\n")},
+			{Target: "codex", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("Shared\n")},
+		},
+	}
+	resCopilot := &adapters.CompileResult{
+		Target: "copilot",
+		Files: []adapters.ArtifactOp{
+			{Target: "copilot", RelPath: ".vscode/mcp.json", Kind: adapters.OpWriteDropIn, Content: []byte("{}\n")},
+			{Target: "copilot", RelPath: "AGENTS.md", Kind: adapters.OpManagedBlock, Shared: true, Content: []byte("Shared\n")},
+		},
+	}
+
+	plan1, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"codex", "copilot"},
+		Config:          cfg,
+		CompiledResults: []*adapters.CompileResult{resCodex, resCopilot},
+	})
+	if err != nil || Commit(plan1) != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	if _, err := Clean(dir, []string{"codex"}, false); err != nil {
+		t.Fatalf("Clean(codex) failed: %v", err)
+	}
+
+	stAfterClean, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState failed: %v", err)
+	}
+
+	// BuildPlan for remaining target copilot must match ExcludeFingerprint with zero drift.
+	planCopilot, err := BuildPlan(PlanInput{
+		ProjectRoot:     dir,
+		ActiveTargets:   []string{"copilot"},
+		Config:          cfg,
+		CompiledResults: []*adapters.CompileResult{resCopilot},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan(copilot) failed: %v", err)
+	}
+	if stAfterClean.ExcludeFingerprint != planCopilot.NextState.ExcludeFingerprint {
+		t.Fatalf("stale ExcludeFingerprint after Clean(codex): state=%q want=%q", stAfterClean.ExcludeFingerprint, planCopilot.NextState.ExcludeFingerprint)
+	}
+	if drifted, reason := CheckWorkspaceDrift(dir, planCopilot); drifted {
+		t.Fatalf("expected no drift for remaining target copilot after Clean(codex), got: %s", reason)
+	}
+}

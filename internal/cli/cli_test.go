@@ -2868,3 +2868,312 @@ Keep functions small.
 		t.Fatalf("generated Agentfile.yaml invalid: %v", err)
 	}
 }
+
+func TestInitImportCursorSkillRuleAndMultiTargetRoundTrip(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	// 1. Sync a multi-target manifest matching examples/starter across all 7 targets (claude, opencode, gemini, cursor, codex, copilot, windsurf),
+	//    plus rules covering always_apply=false with globs, always_apply=false without globs, and always_apply=true with globs,
+	//    and a dotted MCP server name (acme.github).
+	proj := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(proj, "skills", "terraform-auditor"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "skills", "terraform-auditor", "SKILL.md"), []byte("# Terraform Auditor\nAudit TF.\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(proj, "agents"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "agents", "security-reviewer.md"), []byte("Audit IaC.\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(proj, "docs"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "docs", "CODING.md"), []byte("Run gofmt.\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(proj, "docs", "GLOBAL.md"), []byte("Always be concise.\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(proj, "docs", "SCOPED_ALWAYS.md"), []byte("Check SQL queries.\n"), 0o644)
+
+	manifest := `version: 1
+targets: [claude, opencode, gemini, cursor, codex, copilot, windsurf]
+mcp:
+  acme.github:
+    transport: http
+    url: "https://api.githubcopilot.com/mcp/"
+    headers:
+      Authorization: "Bearer ${GITHUB_PAT}"
+skills:
+  - name: terraform-auditor
+    source: ./skills/terraform-auditor
+agents:
+  - name: security-reviewer
+    description: "Audits IaC"
+    model: sonnet
+    source: ./agents/security-reviewer.md
+rules:
+  - name: coding-standards
+    source: ./docs/CODING.md
+    description: "Repository Go conventions"
+    globs: ["**/*.go"]
+    always_apply: false
+  - name: global-baseline
+    source: ./docs/GLOBAL.md
+    description: "Global instructions"
+    always_apply: false
+  - name: sql-always
+    source: ./docs/SCOPED_ALWAYS.md
+    description: "SQL safety"
+    globs: ["**/*.sql"]
+    always_apply: true
+targets_config:
+  opencode:
+    on_unsupported: warn
+  gemini:
+    on_unsupported: warn
+  cursor:
+    on_unsupported: warn
+  codex:
+    on_unsupported: warn
+  copilot:
+    on_unsupported: warn
+  windsurf:
+    on_unsupported: warn
+`
+	_ = os.WriteFile(filepath.Join(proj, "Agentfile.yaml"), []byte(manifest), 0o644)
+
+	var out, errOut bytes.Buffer
+	if code := ExecuteWithIO([]string{"sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("initial 7-target sync failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".cursor", "rules", "agentfile-skill-terraform-auditor.mdc")); err != nil {
+		t.Fatalf("expected Cursor skill rule wrapper on disk: %v", err)
+	}
+
+	// Remove Agentfile.yaml and .agentfile/state.json to simulate importing a 7-target synced repo.
+	_ = os.Remove(filepath.Join(proj, "Agentfile.yaml"))
+	_ = os.Remove(filepath.Join(proj, ".agentfile", "state.json"))
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"init", "--import"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("init --import on 7-target synced repo failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+
+	ps, err := spec.ParseFile(filepath.Join(proj, "Agentfile.yaml"))
+	if err != nil {
+		t.Fatalf("imported Agentfile.yaml invalid: %v", err)
+	}
+
+	// Cursor skill wrapper rule must NOT be imported as rule "skill-terraform-auditor".
+	for _, r := range ps.Rules {
+		if strings.HasPrefix(r.Name, "skill-") {
+			t.Fatalf("unexpected imported Cursor skill wrapper as rule %q in %+v", r.Name, ps.Rules)
+		}
+	}
+	if len(ps.Skills) != 1 || ps.Skills[0].Name != "terraform-auditor" {
+		t.Fatalf("expected 1 skill terraform-auditor, got %+v", ps.Skills)
+	}
+	if _, ok := ps.MCP["acme.github"]; !ok {
+		t.Fatalf("expected dotted MCP server acme.github imported, got %+v", ps.MCP)
+	}
+
+	// Reconciled rules must preserve rich metadata without false divergence.
+	if len(ps.Rules) != 3 {
+		t.Fatalf("expected 3 rules (coding-standards, global-baseline, sql-always), got %+v", ps.Rules)
+	}
+	byName := make(map[string]spec.RuleSpec, len(ps.Rules))
+	for _, r := range ps.Rules {
+		byName[r.Name] = r
+	}
+	if r := byName["coding-standards"]; r.Description != "Repository Go conventions" || !slices.Equal(r.Globs, []string{"**/*.go"}) || r.AlwaysApply {
+		t.Fatalf("unexpected coding-standards rule after merge: %+v", r)
+	}
+	if r := byName["global-baseline"]; r.Description != "Global instructions" || len(r.Globs) != 0 || r.AlwaysApply {
+		t.Fatalf("unexpected global-baseline rule after merge (explicit cursor false should win over windsurf always_on): %+v", r)
+	}
+	if r := byName["sql-always"]; r.Description != "SQL safety" || !slices.Equal(r.Globs, []string{"**/*.sql"}) || !r.AlwaysApply {
+		t.Fatalf("unexpected sql-always rule after merge: %+v", r)
+	}
+
+	// Round-trip sync --force must succeed cleanly without self-collision!
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"sync", "--force"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("round-trip sync --force failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"status", "--check"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("round-trip status --check failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+}
+
+func TestInitImportRuleGenuineDivergenceAndEdgeCases(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("CI", "true")
+
+	var out, errOut bytes.Buffer
+
+	// 1. Explicit empty --targets "" must fail closed with exit 2.
+	emptyTargetDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(emptyTargetDir, ".mcp.json"), []byte(`{"mcpServers":{"fs":{"command":"npx"}}}`), 0o644)
+	if code := ExecuteWithIO([]string{"init", "--import", "--targets", ""}, emptyTargetDir, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 for --targets \"\", got %d (err=%s)", code, errOut.String())
+	}
+
+	// 2. Genuine rule metadata divergences must fail closed with exit 2.
+	divCases := []struct {
+		name  string
+		setup func(dir string)
+	}{
+		{
+			name: "conflicting description",
+			setup: func(dir string) {
+				_ = os.MkdirAll(filepath.Join(dir, ".cursor", "rules"), 0o755)
+				_ = os.MkdirAll(filepath.Join(dir, ".windsurf", "rules"), 0o755)
+				_ = os.WriteFile(filepath.Join(dir, ".cursor", "rules", "agentfile-style.mdc"), []byte("---\ndescription: Desc A\nalwaysApply: true\n---\n\nBody.\n"), 0o644)
+				_ = os.WriteFile(filepath.Join(dir, ".windsurf", "rules", "agentfile-style.md"), []byte("---\ntrigger: always_on\ndescription: Desc B\n---\n\nBody.\n"), 0o644)
+			},
+		},
+		{
+			name: "conflicting globs",
+			setup: func(dir string) {
+				_ = os.MkdirAll(filepath.Join(dir, ".claude", "rules"), 0o755)
+				_ = os.MkdirAll(filepath.Join(dir, ".cursor", "rules"), 0o755)
+				_ = os.WriteFile(filepath.Join(dir, ".claude", "rules", "agentfile-style.md"), []byte("---\npaths:\n  - \"**/*.go\"\n---\n\nBody.\n"), 0o644)
+				_ = os.WriteFile(filepath.Join(dir, ".cursor", "rules", "agentfile-style.mdc"), []byte("---\nglobs: \"**/*.py\"\nalwaysApply: false\n---\n\nBody.\n"), 0o644)
+			},
+		},
+		{
+			name: "conflicting explicit always_apply",
+			setup: func(dir string) {
+				_ = os.MkdirAll(filepath.Join(dir, ".cursor", "rules"), 0o755)
+				_ = os.MkdirAll(filepath.Join(dir, ".windsurf", "rules"), 0o755)
+				_ = os.WriteFile(filepath.Join(dir, ".cursor", "rules", "agentfile-style.mdc"), []byte("---\nglobs: \"**/*.go\"\nalwaysApply: true\n---\n\nBody.\n"), 0o644)
+				_ = os.WriteFile(filepath.Join(dir, ".windsurf", "rules", "agentfile-style.md"), []byte("---\ntrigger: glob\nglobs:\n  - \"**/*.go\"\n---\n\nBody.\n"), 0o644)
+			},
+		},
+	}
+	for _, tc := range divCases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := t.TempDir()
+			tc.setup(d)
+			out.Reset()
+			errOut.Reset()
+			if code := ExecuteWithIO([]string{"init", "--import"}, d, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+				t.Fatalf("%s: expected exit 2, got %d (out=%s err=%s)", tc.name, code, out.String(), errOut.String())
+			}
+			if !strings.Contains(errOut.String(), "divergent definitions for rule") {
+				t.Fatalf("%s: expected divergent rule error, got: %s", tc.name, errOut.String())
+			}
+		})
+	}
+
+	// 3. Codex case-folded authorization header with bearer_token_env_var normalizes cleanly without duplicate keys.
+	codexAuth := t.TempDir()
+	_ = os.WriteFile(filepath.Join(codexAuth, ".mcp.json"), []byte(`{"mcpServers":{"gh":{"type":"http","url":"https://api.example.com/mcp","headers":{"Authorization":"Bearer ${GH_PAT}"}}}}`), 0o644)
+	_ = os.MkdirAll(filepath.Join(codexAuth, ".codex"), 0o755)
+	_ = os.WriteFile(filepath.Join(codexAuth, ".codex", "config.toml"), []byte("[mcp_servers.gh]\nurl = \"https://api.example.com/mcp\"\nbearer_token_env_var = \"GH_PAT\"\nhttp_headers = { authorization = \"Bearer ${GH_PAT}\" }\n"), 0o644)
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"init", "--import"}, codexAuth, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("expected case-folded authorization normalization to succeed, got %d (%s)", code, errOut.String())
+	}
+	psAuth, err := spec.ParseFile(filepath.Join(codexAuth, "Agentfile.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(psAuth.MCP["gh"].Headers) != 1 || psAuth.MCP["gh"].Headers["Authorization"].Raw != "Bearer ${GH_PAT}" {
+		t.Fatalf("expected single canonical Authorization header, got %+v", psAuth.MCP["gh"].Headers)
+	}
+}
+
+func TestStatusUnhydratedTamperedCodexTOMLAndCleanSubsetStatusCheck(t *testing.T) {
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_ALLOW_FILE_GIT", "1")
+	t.Setenv("CI", "true")
+
+	cacheDir := t.TempDir()
+	t.Setenv("AGENTFILE_CACHE_DIR", cacheDir)
+
+	// Set up bare remote skill repo.
+	tmp := t.TempDir()
+	workRepo := filepath.Join(tmp, "work")
+	bareRepo := filepath.Join(tmp, "remote.git")
+	_ = os.MkdirAll(filepath.Join(workRepo, "skills", "k8s"), 0o755)
+	_ = os.WriteFile(filepath.Join(workRepo, "skills", "k8s", "SKILL.md"), []byte("# K8s\n"), 0o644)
+	runGit := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, b)
+		}
+	}
+	runGit(workRepo, "init", "-b", "main")
+	runGit(workRepo, "add", ".")
+	runGit(workRepo, "commit", "-m", "init")
+	runGit(tmp, "clone", "--bare", workRepo, bareRepo)
+
+	proj := t.TempDir()
+	runGit(proj, "init", "-b", "main")
+	repoURL := "file://" + filepath.ToSlash(bareRepo)
+	manifest := `version: 1
+targets: [codex, copilot]
+mcp:
+  github:
+    transport: http
+    url: "https://api.example.com/mcp"
+skills:
+  - name: k8s
+    source: "` + repoURL + `//skills/k8s"
+`
+	_ = os.WriteFile(filepath.Join(proj, "Agentfile.yaml"), []byte(manifest), 0o644)
+
+	var out, errOut bytes.Buffer
+	if code := ExecuteWithIO([]string{"sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("sync failed (%d): %s", code, errOut.String())
+	}
+
+	// 1. Clean subset codex, then status --targets copilot --check MUST exit 0 (ExcludeFingerprint updated).
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"clean", "--targets", "codex"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("clean --targets codex failed (%d): %s", code, errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"status", "--targets", "copilot", "--check"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("status --targets copilot --check after clean --targets codex failed (%d): %s\n%s", code, errOut.String(), out.String())
+	}
+
+	// 2. Re-sync codex, switch to cold cache (unhydrated), tamper .codex/config.toml -> status must report drift!
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("re-sync failed (%d): %s", code, errOut.String())
+	}
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	_ = os.WriteFile(filepath.Join(proj, ".codex", "config.toml"), []byte("[mcp_servers.github]\nurl = \"https://tampered.example.com/\"\n"), 0o644)
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"status", "--json"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("status --json failed (%d): %s", code, errOut.String())
+	}
+	var rep StatusReport
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatalf("invalid status JSON: %v\n%s", err, out.String())
+	}
+	if !rep.Drifted {
+		t.Fatalf("expected Drifted=true on tampered .codex/config.toml while unhydrated, got %+v", rep)
+	}
+	var codexRep *StatusTargetReport
+	for i := range rep.PerTarget {
+		if rep.PerTarget[i].Target == "codex" {
+			codexRep = &rep.PerTarget[i]
+		}
+	}
+	if codexRep == nil || !slices.Contains(codexRep.DriftedPaths, ".codex/config.toml") {
+		t.Fatalf("expected .codex/config.toml in codex DriftedPaths while unhydrated, got %+v", codexRep)
+	}
+}

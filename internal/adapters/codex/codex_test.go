@@ -401,3 +401,29 @@ func TestCodexGlobalConfigSpecsIsSessionArgsAndPlanLaunch(t *testing.T) {
 		t.Fatalf("expected IsolationPartialWarn DiagWarning, got %+v err=%v", lpWarn, err)
 	}
 }
+
+func TestCodexDottedMCPServerName(t *testing.T) {
+	t.Parallel()
+	adp := New()
+	b := &ir.Bundle{
+		Targets: []string{"codex"},
+		MCP: []ir.IRMCPServer{
+			{
+				Name:      "acme.github",
+				Transport: "http",
+				URL:       spec.EnvString{Raw: "https://acme.example.com/mcp"},
+			},
+		},
+	}
+	res, err := adp.Compile(b, nil)
+	if err != nil {
+		t.Fatalf("Compile failed: %v", err)
+	}
+	if len(res.Files) != 1 || res.Files[0].TOMLMerge == nil {
+		t.Fatalf("expected .codex/config.toml TOMLMerge op, got %+v", res.Files)
+	}
+	entries := res.Files[0].TOMLMerge.TableEntries
+	if _, ok := entries[`mcp_servers."acme.github"`]; !ok {
+		t.Fatalf("expected quoted dotted TOML key mcp_servers.\"acme.github\", got keys: %v", entries)
+	}
+}

@@ -206,21 +206,81 @@ func resolveTOMLConflict(resolveConflict ConflictResolver, detail string) (bool,
 	return resolveConflict(detail)
 }
 
-func splitTOMLPath(dottedKey string) ([]string, error) {
-	if dottedKey == "" {
+func parseTOMLPath(path string) ([]string, error) {
+	if path == "" {
 		return nil, spec.NewPolicyError("empty TOML key path")
 	}
-	parts := strings.Split(dottedKey, ".")
-	for _, p := range parts {
-		if p == "" {
-			return nil, spec.NewPolicyError("invalid TOML key path %q", dottedKey)
+	var parts []string
+	i := 0
+	for i < len(path) {
+		if path[i] == '"' {
+			i++
+			var seg strings.Builder
+			closed := false
+			for i < len(path) {
+				ch := path[i]
+				if ch == '\\' {
+					i++
+					if i >= len(path) {
+						return nil, spec.NewPolicyError("invalid TOML key path %q", path)
+					}
+					switch path[i] {
+					case '"', '\\':
+						seg.WriteByte(path[i])
+					default:
+						return nil, spec.NewPolicyError("invalid TOML key path %q", path)
+					}
+					i++
+					continue
+				}
+				if ch == '"' {
+					closed = true
+					i++
+					break
+				}
+				seg.WriteByte(ch)
+				i++
+			}
+			if !closed {
+				return nil, spec.NewPolicyError("invalid TOML key path %q", path)
+			}
+			parts = append(parts, seg.String())
+			if i < len(path) {
+				if path[i] != '.' {
+					return nil, spec.NewPolicyError("invalid TOML key path %q", path)
+				}
+				i++
+				if i == len(path) {
+					return nil, spec.NewPolicyError("invalid TOML key path %q", path)
+				}
+			}
+			continue
+		}
+
+		start := i
+		for i < len(path) && path[i] != '.' {
+			if path[i] == '"' {
+				return nil, spec.NewPolicyError("invalid TOML key path %q", path)
+			}
+			i++
+		}
+		seg := path[start:i]
+		if seg == "" {
+			return nil, spec.NewPolicyError("invalid TOML key path %q", path)
+		}
+		parts = append(parts, seg)
+		if i < len(path) {
+			i++
+			if i == len(path) {
+				return nil, spec.NewPolicyError("invalid TOML key path %q", path)
+			}
 		}
 	}
 	return parts, nil
 }
 
 func getAtTOMLPath(doc map[string]any, dottedKey string) (any, bool, error) {
-	parts, err := splitTOMLPath(dottedKey)
+	parts, err := parseTOMLPath(dottedKey)
 	if err != nil {
 		return nil, false, err
 	}
@@ -240,7 +300,7 @@ func getAtTOMLPath(doc map[string]any, dottedKey string) (any, bool, error) {
 }
 
 func setAtTOMLPath(doc map[string]any, dottedKey string, val any) error {
-	parts, err := splitTOMLPath(dottedKey)
+	parts, err := parseTOMLPath(dottedKey)
 	if err != nil {
 		return err
 	}
@@ -265,7 +325,7 @@ func setAtTOMLPath(doc map[string]any, dottedKey string, val any) error {
 }
 
 func removeAtTOMLPath(doc map[string]any, dottedKey string) (bool, error) {
-	parts, err := splitTOMLPath(dottedKey)
+	parts, err := parseTOMLPath(dottedKey)
 	if err != nil {
 		return false, err
 	}

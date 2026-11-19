@@ -33,7 +33,7 @@ agentfile init --import [--targets <list>] [--force] [--dry-run] [--json]
 
 ## `agentfile sync`
 
-Resolves dependencies, validates `Agentfile.lock`, compiles active targets, runs post-merge policy checks, updates `.agentfile/state.json` (including `shared` and `shared_owned_dirs` ownership for co-owned artifacts such as `AGENTS.md` and `.agents/skills/<name>`), and manages worktree-safe excludes in `<git-common-dir>/info/exclude` (excluding `.agentfile/{state.json,config.yaml,sync.lock,commit-journal.json,backups/}` and unmanaged compiled outputs while keeping `.agentfile/imported/` trackable in Git).
+Resolves dependencies, validates `Agentfile.lock`, compiles active targets, runs post-merge policy checks, updates `.agentfile/state.json` (including `shared` and `shared_owned_dirs` ownership for co-owned artifacts such as `AGENTS.md` and `.agents/skills/<name>`), and manages worktree-safe excludes in `<git-common-dir>/info/exclude` (excluding `.agentfile/{state.json,config.yaml,sync.lock,commit-journal.json,backups/}` and untracked compiled outputs while keeping `.agentfile/imported/` trackable in Git).
 
 ```sh
 agentfile sync [flags]

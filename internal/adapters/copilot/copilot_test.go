@@ -3,6 +3,7 @@ package copilot
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bettertux007/agentfile/internal/adapters"
@@ -238,5 +239,65 @@ func TestCopilotPlanLaunchAndGlobalConfigSpecs(t *testing.T) {
 	lpTrue, err := adp.PlanLaunch(b, adapters.LaunchOptions{LoadGlobal: true}, adapters.LaunchFacts{})
 	if err != nil || lpTrue.Mode != adapters.IsolationNone {
 		t.Fatalf("expected IsolationNone when LoadGlobal=true, got %+v err=%v", lpTrue, err)
+	}
+}
+
+func TestCopilotDeterministicDiagnosticsOrder(t *testing.T) {
+	t.Parallel()
+	adp := New()
+	alphaDef, _ := spec.ParseEnvString("${ALPHA_VAR:-a}")
+	zuluDef, _ := spec.ParseEnvString("${ZULU_VAR:-z}")
+	hdrAlpha, _ := spec.ParseEnvString("${HDR_A:-ha}")
+	hdrZulu, _ := spec.ParseEnvString("${HDR_Z:-hz}")
+
+	b := &ir.Bundle{
+		Targets: []string{"copilot"},
+		MCP: []ir.IRMCPServer{
+			{
+				Name:      "s1",
+				Transport: "stdio",
+				Command:   spec.EnvString{Raw: "npx"},
+				Env: map[string]spec.EnvString{
+					"ZULU":  zuluDef,
+					"ALPHA": alphaDef,
+				},
+			},
+			{
+				Name:      "s2",
+				Transport: "http",
+				URL:       spec.EnvString{Raw: "https://example.com"},
+				Headers: map[string]spec.EnvString{
+					"X-Zulu":  hdrZulu,
+					"X-Alpha": hdrAlpha,
+				},
+			},
+		},
+	}
+
+	var baseline []string
+	for iter := 0; iter < 15; iter++ {
+		res, err := adp.Compile(b, nil)
+		if err != nil {
+			t.Fatalf("Compile failed: %v", err)
+		}
+		msgs := make([]string, 0, len(res.Diagnostics))
+		for _, d := range res.Diagnostics {
+			msgs = append(msgs, d.Message)
+		}
+		if len(msgs) != 4 {
+			t.Fatalf("expected 4 diagnostics, got %v", msgs)
+		}
+		if iter == 0 {
+			baseline = msgs
+			if !strings.Contains(msgs[0], "ALPHA_VAR") || !strings.Contains(msgs[1], "ZULU_VAR") || !strings.Contains(msgs[2], "HDR_A") || !strings.Contains(msgs[3], "HDR_Z") {
+				t.Fatalf("expected sorted diagnostic order ALPHA_VAR, ZULU_VAR, HDR_A, HDR_Z; got %v", msgs)
+			}
+		} else {
+			for i := range msgs {
+				if msgs[i] != baseline[i] {
+					t.Fatalf("non-deterministic diagnostic order on iter %d: %v vs %v", iter, msgs, baseline)
+				}
+			}
+		}
 	}
 }

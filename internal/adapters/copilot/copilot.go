@@ -115,8 +115,13 @@ func (a *Adapter) Compile(bundle *ir.Bundle, _ adapters.ProbeResults) (*adapters
 				}
 				if len(srv.Env) > 0 {
 					envMap := make(map[string]string, len(srv.Env))
-					for k, v := range srv.Env {
-						s, ed := a.renderEnv(v, warnMode)
+					envKeys := make([]string, 0, len(srv.Env))
+					for k := range srv.Env {
+						envKeys = append(envKeys, k)
+					}
+					sort.Strings(envKeys)
+					for _, k := range envKeys {
+						s, ed := a.renderEnv(srv.Env[k], warnMode)
 						res.Diagnostics = append(res.Diagnostics, ed...)
 						envMap[k] = s
 					}
@@ -129,8 +134,13 @@ func (a *Adapter) Compile(bundle *ir.Bundle, _ adapters.ProbeResults) (*adapters
 				entry["url"] = urlStr
 				if len(srv.Headers) > 0 {
 					hdrs := make(map[string]string, len(srv.Headers))
-					for k, v := range srv.Headers {
-						s, hd := a.renderEnv(v, warnMode)
+					hdrKeys := make([]string, 0, len(srv.Headers))
+					for k := range srv.Headers {
+						hdrKeys = append(hdrKeys, k)
+					}
+					sort.Strings(hdrKeys)
+					for _, k := range hdrKeys {
+						s, hd := a.renderEnv(srv.Headers[k], warnMode)
 						res.Diagnostics = append(res.Diagnostics, hd...)
 						hdrs[k] = s
 					}
