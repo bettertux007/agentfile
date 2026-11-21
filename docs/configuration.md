@@ -153,4 +153,4 @@ Per-target `load_global` resolution for `agentfile run`, `agentfile status`, `ag
 
 ## 4. IDE Autocomplete
 
-See [schemas/README.md](../schemas/README.md) for `# yaml-language-server: $schema=...` modelines and VS Code `yaml.schemas` mappings covering `Agentfile.yaml`, `.agentfile/config.yaml`, and `Agentfile.lock`.
+See [JSON Schema v1 & IDE Autocomplete](schemas.md) for `# yaml-language-server: $schema=...` modelines and VS Code `yaml.schemas` mappings covering `Agentfile.yaml`, `.agentfile/config.yaml`, and `Agentfile.lock`.
