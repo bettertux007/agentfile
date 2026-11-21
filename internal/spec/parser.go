@@ -24,7 +24,7 @@ var knownTargets = map[string]bool{
 	"windsurf": true,
 }
 
-// ParseFile reads and validates an Agentfile.yaml from disk.
+// ParseFile reads and validates a standalone Agentfile.yaml from disk.
 func ParseFile(path string) (*ProjectSpec, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -33,8 +33,64 @@ func ParseFile(path string) (*ProjectSpec, error) {
 	return Parse(bytes.NewReader(data))
 }
 
-// Parse strictly decodes and validates an Agentfile.yaml v1 stream.
+// ParseRawFile reads an Agentfile.yaml from disk and validates raw layer rules
+// (allowing targets to be omitted when extends is non-empty).
+func ParseRawFile(path string) (*ProjectSpec, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return ParseRaw(bytes.NewReader(data))
+}
+
+// ParseBaseFile reads an inherited base Agentfile.yaml from disk and validates
+// layer fields (allowing targets to be omitted in base manifests).
+func ParseBaseFile(path string) (*ProjectSpec, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return ParseBase(bytes.NewReader(data))
+}
+
+// Parse strictly decodes and validates a standalone Agentfile.yaml v1 stream.
 func Parse(r io.Reader) (*ProjectSpec, error) {
+	spec, err := decodeYAMLSpec(r)
+	if err != nil {
+		return nil, err
+	}
+	if err := Validate(spec); err != nil {
+		return nil, err
+	}
+	return spec, nil
+}
+
+// ParseRaw strictly decodes an Agentfile.yaml v1 stream and allows targets to be
+// omitted when extends is non-empty.
+func ParseRaw(r io.Reader) (*ProjectSpec, error) {
+	spec, err := decodeYAMLSpec(r)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateRaw(spec, false); err != nil {
+		return nil, err
+	}
+	return spec, nil
+}
+
+// ParseBase strictly decodes an inherited base manifest stream (targets optional).
+func ParseBase(r io.Reader) (*ProjectSpec, error) {
+	spec, err := decodeYAMLSpec(r)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateRaw(spec, true); err != nil {
+		return nil, err
+	}
+	return spec, nil
+}
+
+func decodeYAMLSpec(r io.Reader) (*ProjectSpec, error) {
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
 
@@ -54,19 +110,38 @@ func Parse(r io.Reader) (*ProjectSpec, error) {
 	if err := dec.Decode(&extra); err != io.EOF {
 		return nil, NewPolicyError("Agentfile.yaml must contain a single YAML document")
 	}
-
-	if err := Validate(&spec); err != nil {
-		return nil, err
-	}
 	return &spec, nil
 }
 
-// Validate checks structural and security invariants on a parsed ProjectSpec.
+// Validate checks structural and security invariants on a standalone or effective ProjectSpec.
 func Validate(s *ProjectSpec) error {
+	return ValidateEffective(s)
+}
+
+// ValidateEffective checks structural and security invariants on a post-merge ProjectSpec.
+func ValidateEffective(s *ProjectSpec) error {
+	if s == nil {
+		return NewPolicyError("ProjectSpec is nil")
+	}
+	if err := ValidateRaw(s, true); err != nil {
+		return err
+	}
+	if len(s.Targets) == 0 {
+		return NewPolicyError("Agentfile.yaml must specify at least one target in 'targets'")
+	}
+	return nil
+}
+
+// ValidateRaw checks structural and security invariants on a single manifest layer.
+// When allowEmptyTargets is false, targets may only be omitted if len(s.Extends) > 0.
+func ValidateRaw(s *ProjectSpec, allowEmptyTargets bool) error {
+	if s == nil {
+		return NewPolicyError("ProjectSpec is nil")
+	}
 	if s.Version != 1 {
 		return NewPolicyError("unsupported Agentfile.yaml version %d (expected 1)", s.Version)
 	}
-	if len(s.Targets) == 0 {
+	if !allowEmptyTargets && len(s.Targets) == 0 && len(s.Extends) == 0 {
 		return NewPolicyError("Agentfile.yaml must specify at least one target in 'targets'")
 	}
 	seenTargets := make(map[string]bool, len(s.Targets))

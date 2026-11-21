@@ -212,3 +212,34 @@ targets_config:
 		}
 	}
 }
+
+func TestParseRawAndParseBaseWithExtends(t *testing.T) {
+	t.Parallel()
+
+	// Child manifest with extends and omitted targets succeeds in ParseRaw, fails standalone Parse.
+	rawYAML := "version: 1\nextends: ./base/Agentfile.yaml\n"
+	if _, err := Parse(strings.NewReader(rawYAML)); err == nil {
+		t.Fatalf("expected standalone Parse to reject omitted targets even when extends is present")
+	}
+	ps, err := ParseRaw(strings.NewReader(rawYAML))
+	if err != nil {
+		t.Fatalf("expected ParseRaw to accept omitted targets when extends is present: %v", err)
+	}
+	if len(ps.Extends) != 1 || ps.Extends[0].Raw != "./base/Agentfile.yaml" {
+		t.Fatalf("unexpected extends: %+v", ps.Extends)
+	}
+
+	// Base manifest without targets or extends succeeds in ParseBase.
+	baseYAML := "version: 1\nskills:\n  - name: sec\n    source: ./skills/sec\n"
+	if _, err := ParseRaw(strings.NewReader(baseYAML)); err == nil {
+		t.Fatalf("expected ParseRaw to reject omitted targets when extends is empty")
+	}
+	if _, err := ParseBase(strings.NewReader(baseYAML)); err != nil {
+		t.Fatalf("expected ParseBase to accept base manifest without targets: %v", err)
+	}
+
+	// Empty extends list rejected.
+	if _, err := ParseRaw(strings.NewReader("version: 1\nextends: []\ntargets: [claude]\n")); err == nil {
+		t.Fatalf("expected error on empty extends list")
+	}
+}

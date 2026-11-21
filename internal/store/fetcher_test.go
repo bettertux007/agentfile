@@ -891,3 +891,186 @@ func TestResolveWithOptionsReconcileAddAndReplaceToLocal(t *testing.T) {
 		t.Fatalf("expected error on nil ProjectSpec in ResolveWithOptions")
 	}
 }
+
+func TestComposeManifestRemoteAndLocalExtendsAndCycles(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	workRepo := filepath.Join(tmp, "work")
+	bareRepo := filepath.Join(tmp, "remote-base.git")
+	cacheDir := filepath.Join(tmp, "cache")
+	projDir := filepath.Join(tmp, "project")
+
+	// Set up remote base repo with //base/Agentfile.yaml, //base/skills/sec/SKILL.md, and //base/rules/org.md.
+	if err := os.MkdirAll(filepath.Join(workRepo, "base", "skills", "sec"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workRepo, "base", "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workRepo, "base", "skills", "sec", "SKILL.md"), []byte("# Security Skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workRepo, "base", "rules", "org.md"), []byte("Always run tests.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	remoteBaseYAML := `version: 1
+targets: [claude, opencode]
+skills:
+  - name: sec
+    source: ./skills/sec
+rules:
+  - name: org-rule
+    source: ./rules/org.md
+settings:
+  permissions:
+    deny_commands: ["rm -rf *"]
+targets_config:
+  claude:
+    load_global: false
+`
+	if err := os.WriteFile(filepath.Join(workRepo, "base", "Agentfile.yaml"), []byte(remoteBaseYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runGitTest(t, workRepo, "init", "-b", "main")
+	runGitTest(t, workRepo, "add", ".")
+	runGitTest(t, workRepo, "commit", "-m", "v1 base")
+	runGitTest(t, workRepo, "tag", "-a", "v1.0.0", "-m", "v1.0.0")
+	runGitTest(t, tmp, "clone", "--bare", workRepo, bareRepo)
+
+	// Set up project with a local preset and Agentfile.yaml extending both remote and local base.
+	if err := os.MkdirAll(filepath.Join(projDir, "presets", "skills", "local-p"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, "presets", "skills", "local-p", "SKILL.md"), []byte("# Local Preset\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	localPresetYAML := `version: 1
+skills:
+  - name: local-p
+    source: ./skills/local-p
+`
+	if err := os.WriteFile(filepath.Join(projDir, "presets", "Agentfile.yaml"), []byte(localPresetYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repoURL := "file://" + filepath.ToSlash(bareRepo)
+	childYAML := "version: 1\nextends:\n  - " + repoURL + "#v1.0.0//base/Agentfile.yaml\n  - ./presets/Agentfile.yaml\n"
+	if err := os.WriteFile(filepath.Join(projDir, "Agentfile.yaml"), []byte(childYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &Store{RootDir: cacheDir, Git: &ExecGitRunner{}}
+	parseOpts := ParseOptions{AllowFileScheme: true}
+
+	// 1. Before hydration, offline InspectComposedManifest reports unhydrated remote extends cleanly without erroring on omitted targets.
+	roStore := &Store{RootDir: cacheDir, Git: &failingGitRunner{t: t}}
+	cmCold, repCold, err := roStore.InspectComposedManifest(projDir, nil, nil, parseOpts)
+	if err != nil {
+		t.Fatalf("offline cold InspectComposedManifest failed: %v", err)
+	}
+	if len(repCold.UnhydratedExtends) != 1 || repCold.LockStatus != "missing" || cmCold == nil {
+		t.Fatalf("expected 1 unhydrated extends and missing lock, got rep=%+v", repCold)
+	}
+
+	// 2. Hydrate via ComposeManifest + ResolveWithOptions.
+	compRes, err := st.ComposeManifest(context.Background(), projDir, nil, nil, ResolveOptions{ParseOpts: parseOpts})
+	if err != nil {
+		t.Fatalf("ComposeManifest failed: %v", err)
+	}
+	if len(compRes.NextLock.Extends) != 1 {
+		t.Fatalf("expected 1 extends lock entry, got %+v", compRes.NextLock.Extends)
+	}
+	res, err := st.ResolveWithOptions(context.Background(), projDir, compRes.Composed.Effective, compRes.NextLock, ResolveOptions{ParseOpts: parseOpts})
+	if err != nil {
+		t.Fatalf("ResolveWithOptions on composed spec failed: %v", err)
+	}
+	// Verify single-file rule SourcePath points to org.md (not a directory) and skill SourcePath points to directory.
+	ruleAsset, ok := res.Assets["rule:org-rule"]
+	if !ok {
+		t.Fatalf("missing resolved rule:org-rule")
+	}
+	rInfo, err := os.Stat(ruleAsset.SourcePath)
+	if err != nil || rInfo.IsDir() {
+		t.Fatalf("expected rule SourcePath %s to be a regular file, err=%v", ruleAsset.SourcePath, err)
+	}
+	skillAsset, ok := res.Assets["skill:sec"]
+	if !ok {
+		t.Fatalf("missing resolved skill:sec")
+	}
+	sInfo, err := os.Stat(skillAsset.SourcePath)
+	if err != nil || !sInfo.IsDir() {
+		t.Fatalf("expected skill SourcePath %s to be a directory, err=%v", skillAsset.SourcePath, err)
+	}
+
+	// 3. Offline InspectComposedManifest after hydration succeeds with zero git calls and LockStatus=="ok".
+	cmWarm, repWarm, err := roStore.InspectComposedManifest(projDir, nil, res.NextLock, parseOpts)
+	if err != nil {
+		t.Fatalf("warm InspectComposedManifest failed: %v", err)
+	}
+	if repWarm.LockStatus != "ok" || len(repWarm.Unhydrated) != 0 || len(cmWarm.Effective.Skills) != 2 {
+		t.Fatalf("unexpected warm inspect report: rep=%+v skills=%+v", repWarm, cmWarm.Effective.Skills)
+	}
+
+	// 4. Tamper with extracted skill directory -> Corrupt is populated while Unhydrated also blocks ir.Build.
+	_ = os.WriteFile(filepath.Join(skillAsset.SourcePath, "TAMPERED.txt"), []byte("tampered"), 0o644)
+	_, repCorrupt, err := roStore.InspectComposedManifest(projDir, nil, res.NextLock, parseOpts)
+	if err != nil {
+		t.Fatalf("corrupt InspectComposedManifest failed: %v", err)
+	}
+	if len(repCorrupt.Corrupt) != 1 || repCorrupt.Corrupt[0] != "skill:sec" || len(repCorrupt.Unhydrated) == 0 {
+		t.Fatalf("expected Corrupt=[skill:sec] and Unhydrated non-empty, got %+v", repCorrupt)
+	}
+
+	// 5. Cycle detection (A -> B -> A) rejected with PolicyError.
+	cycleDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(cycleDir, "Agentfile.yaml"), []byte("version: 1\nextends: ./b.yaml\ntargets: [claude]\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(cycleDir, "b.yaml"), []byte("version: 1\nextends: ./Agentfile.yaml\n"), 0o644)
+	if _, err := st.ComposeManifest(context.Background(), cycleDir, nil, nil, ResolveOptions{}); err == nil {
+		t.Fatalf("expected error on cyclic extends")
+	}
+
+	// 6. Conflicting refs for same base in diamond DAG rejected.
+	conflictDir := t.TempDir()
+	conflictYAML := "version: 1\nextends:\n  - " + repoURL + "#v1.0.0//base/Agentfile.yaml\n  - " + repoURL + "#main//base/Agentfile.yaml\ntargets: [claude]\n"
+	_ = os.WriteFile(filepath.Join(conflictDir, "Agentfile.yaml"), []byte(conflictYAML), 0o644)
+	if _, err := st.ComposeManifest(context.Background(), conflictDir, nil, nil, ResolveOptions{ParseOpts: parseOpts}); err == nil {
+		t.Fatalf("expected error on conflicting refs for same extends base")
+	}
+
+	// 7. Unhydrated remote extends with existing lockfile runs verifyPartialLockMatches cleanly.
+	coldStore2 := &Store{RootDir: t.TempDir(), Git: &failingGitRunner{t: t}}
+	_, repPartial, err := coldStore2.InspectComposedManifest(projDir, nil, res.NextLock, parseOpts)
+	if err != nil {
+		t.Fatalf("InspectComposedManifest with cold cache and existing lock failed: %v", err)
+	}
+	if repPartial.LockStatus != "ok" || len(repPartial.UnhydratedExtends) != 1 {
+		t.Fatalf("expected LockStatus=ok and 1 unhydrated extends under partial lock verification, got %+v", repPartial)
+	}
+
+	// 8. Directory extends path, missing local extends, and InspectComposedManifest with local-only + remote agent/rule.
+	dirExtProj := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dirExtProj, "presets"), 0o755)
+	_ = os.WriteFile(filepath.Join(dirExtProj, "presets", "Agentfile.yaml"), []byte("version: 1\ntargets: [claude]\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dirExtProj, "Agentfile.yaml"), []byte("version: 1\nextends: ./presets\n"), 0o644)
+	if _, repDir, err := roStore.InspectComposedManifest(dirExtProj, nil, nil, parseOpts); err != nil || repDir.LockStatus != "not_required" {
+		t.Fatalf("expected directory extends and not_required lock, got rep=%+v err=%v", repDir, err)
+	}
+
+	missingExtProj := t.TempDir()
+	_ = os.WriteFile(filepath.Join(missingExtProj, "Agentfile.yaml"), []byte("version: 1\nextends: ./nonexistent.yaml\n"), 0o644)
+	if _, err := st.ComposeManifest(context.Background(), missingExtProj, nil, nil, ResolveOptions{}); err == nil {
+		t.Fatalf("expected error on missing local extends in ComposeManifest")
+	}
+	if _, repMiss, err := roStore.InspectComposedManifest(missingExtProj, nil, nil, parseOpts); err != nil || len(repMiss.MissingLocal) == 0 {
+		t.Fatalf("expected MissingLocal on missing local extends in InspectComposedManifest, got rep=%+v err=%v", repMiss, err)
+	}
+
+	// Unknown extends update target rejected.
+	if _, err := st.ComposeManifest(context.Background(), dirExtProj, nil, nil, ResolveOptions{UpdateTarget: "extends"}); err == nil {
+		t.Fatalf("expected error on UpdateTarget=extends when no remote extends exist")
+	}
+	if _, err := st.ComposeManifest(context.Background(), projDir, nil, res.NextLock, ResolveOptions{UpdateTarget: "extends:https://unknown", ParseOpts: parseOpts}); err == nil {
+		t.Fatalf("expected error on unknown extends:<url> update target")
+	}
+}

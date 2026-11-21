@@ -114,3 +114,31 @@ targets_config:
 		}
 	}
 }
+
+func TestValidateAgentfileAndLockExtendsSchema(t *testing.T) {
+	t.Parallel()
+
+	// Single string extends without targets is valid at raw schema layer.
+	if err := ValidateAgentfileV1([]byte("version: 1\nextends: ./base/Agentfile.yaml\n")); err != nil {
+		t.Fatalf("expected valid extends without targets: %v", err)
+	}
+	// List of extends with structured git source.
+	if err := ValidateAgentfileV1([]byte("version: 1\nextends:\n  - ./base/Agentfile.yaml\n  - git: https://github.com/org/base.git\n    ref: v1.0.0\n    path: base/Agentfile.yaml\ntargets: [claude]\n")); err != nil {
+		t.Fatalf("expected valid extends list: %v", err)
+	}
+	// Missing both extends and targets must fail.
+	if err := ValidateAgentfileV1([]byte("version: 1\n")); err == nil {
+		t.Fatalf("expected schema error when both extends and targets are omitted")
+	}
+	// Empty extends array must fail.
+	if err := ValidateAgentfileV1([]byte("version: 1\nextends: []\n")); err == nil {
+		t.Fatalf("expected schema error on empty extends array")
+	}
+
+	// Lockfile with extends map.
+	validLockWithExtends := []byte("version: 1\nextends:\n  \"https://github.com/org/base.git//base/Agentfile.yaml\":\n    source: https://github.com/org/base.git\n    ref: v1.0.0\n    commit_sha: " +
+		strings.Repeat("a", 40) + "\n    content_hash: sha256:" + strings.Repeat("b", 64) + "\ndependencies: {}\n")
+	if err := ValidateLockfileV1(validLockWithExtends); err != nil {
+		t.Fatalf("expected valid lockfile with extends: %v", err)
+	}
+}

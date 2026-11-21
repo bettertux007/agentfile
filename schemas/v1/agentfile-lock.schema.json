@@ -13,6 +13,16 @@
       "default": 1,
       "description": "Lockfile schema version. Must be integer 1."
     },
+    "extends": {
+      "type": "object",
+      "description": "Pinned remote base manifests keyed by canonical URL and subpath.",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/lockEntry"
+      }
+    },
     "dependencies": {
       "type": "object",
       "description": "Pinned remote dependencies keyed by <kind>:<name>.",

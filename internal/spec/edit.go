@@ -299,7 +299,7 @@ func encodeAndValidateAST(doc *yaml.Node) ([]byte, error) {
 		return nil, fmt.Errorf("close yaml encoder: %w", err)
 	}
 	out := buf.Bytes()
-	if _, err := Parse(bytes.NewReader(out)); err != nil {
+	if _, err := ParseRaw(bytes.NewReader(out)); err != nil {
 		return nil, err
 	}
 	return out, nil

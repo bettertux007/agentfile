@@ -140,3 +140,86 @@ func TestVerifyMatchesSkipsLocalAndDetectsDrift(t *testing.T) {
 		t.Fatalf("expected error saving nil lockfile")
 	}
 }
+
+func TestVerifyMatchesComposedAndExtendsLockKey(t *testing.T) {
+	t.Parallel()
+
+	if got := ExtendsLockKey("https://github.com/org/base.git", ""); got != "https://github.com/org/base.git" {
+		t.Fatalf("unexpected ExtendsLockKey for empty subpath: %s", got)
+	}
+	if got := ExtendsLockKey("https://github.com/org/base.git", "//base/Agentfile.yaml/"); got != "https://github.com/org/base.git//base/Agentfile.yaml" {
+		t.Fatalf("unexpected ExtendsLockKey for subpath: %s", got)
+	}
+
+	baseLayer := ManifestLayer{
+		Origin: LayerOrigin{
+			Source:    "https://github.com/org/base.git",
+			Ref:       "v1.0.0",
+			CommitSHA: strings.Repeat("a", 40),
+			Subpath:   "base/Agentfile.yaml",
+			IsRemote:  true,
+		},
+		Spec: &ProjectSpec{
+			Version: 1,
+			Targets: []string{"claude"},
+			Skills: []AssetSpec{
+				{Name: "sec", Source: SourceSpec{Raw: "./skills/sec"}},
+			},
+		},
+	}
+	rootLayer := ManifestLayer{
+		Origin: LayerOrigin{Source: "Agentfile.yaml", IsRoot: true},
+		Spec: &ProjectSpec{
+			Version: 1,
+			Extends: ExtendsList{{Raw: "https://github.com/org/base.git#v1.0.0//base/Agentfile.yaml"}},
+		},
+	}
+	cm, err := ComposeLayers([]ManifestLayer{baseLayer, rootLayer}, "/repo")
+	if err != nil {
+		t.Fatalf("ComposeLayers failed: %v", err)
+	}
+
+	lf := &Lockfile{
+		Version: 1,
+		Extends: map[string]LockEntry{
+			"https://github.com/org/base.git//base/Agentfile.yaml": {
+				Source:      "https://github.com/org/base.git",
+				Ref:         "v1.0.0",
+				CommitSHA:   strings.Repeat("a", 40),
+				ContentHash: "sha256:" + strings.Repeat("1", 64),
+			},
+		},
+		Dependencies: map[string]LockEntry{
+			"skill:sec": {
+				Source:      "https://github.com/org/base.git",
+				Ref:         strings.Repeat("a", 40),
+				CommitSHA:   strings.Repeat("a", 40),
+				ContentHash: "sha256:" + strings.Repeat("2", 64),
+			},
+		},
+	}
+	if !lf.HasRemoteEntries() {
+		t.Fatalf("expected HasRemoteEntries true")
+	}
+
+	inspect := func(src SourceSpec) (string, string, string, bool, error) {
+		if src.IsStructured {
+			return src.Git, src.Ref, src.Path, true, nil
+		}
+		return "https://github.com/org/base.git", "v1.0.0", "base/Agentfile.yaml", true, nil
+	}
+	if err := VerifyMatchesComposed(lf, cm, inspect); err != nil {
+		t.Fatalf("VerifyMatchesComposed failed: %v", err)
+	}
+
+	// Drift in lf.Extends must fail VerifyMatchesComposed.
+	lf.Extends["https://github.com/org/base.git//base/Agentfile.yaml"] = LockEntry{
+		Source:      "https://github.com/org/base.git",
+		Ref:         "v2.0.0",
+		CommitSHA:   strings.Repeat("a", 40),
+		ContentHash: "sha256:" + strings.Repeat("1", 64),
+	}
+	if err := VerifyMatchesComposed(lf, cm, inspect); err == nil {
+		t.Fatalf("expected error on extends ref drift")
+	}
+}

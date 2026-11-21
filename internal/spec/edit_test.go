@@ -590,4 +590,14 @@ func TestEditErrorAndEdgeCases(t *testing.T) {
 	// Sequence containing non-mapping element fails round-trip Parse.
 	_, err = AddSkill([]byte("version: 1\ntargets: [claude]\nskills:\n  - not-a-mapping\n"), AddSkillInput{Name: "a", Source: "./a"})
 	assertPolicyError(t, err, "non-mapping sequence item")
+
+	// Child manifest with extends and omitted targets can be edited via AddSkill.
+	extChild := []byte("version: 1\nextends: ./base/Agentfile.yaml\n")
+	editedExt, err := AddSkill(extChild, AddSkillInput{Name: "extra", Source: "./skills/extra"})
+	if err != nil {
+		t.Fatalf("expected AddSkill to succeed on child manifest with extends and omitted targets: %v", err)
+	}
+	if !strings.Contains(string(editedExt), "extra") {
+		t.Fatalf("expected extra skill in edited output:\n%s", editedExt)
+	}
 }

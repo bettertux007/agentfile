@@ -105,11 +105,15 @@ type LockDelta struct {
 
 // InspectReport describes read-only dependency and lockfile inspection results.
 type InspectReport struct {
-	Assets       map[string]ResolvedAsset
-	Unhydrated   []string
-	MissingLocal []string
-	LockStatus   string // "ok" | "not_required" | "missing" | "out_of_sync" | "invalid"
-	LockError    error
+	Assets            map[string]ResolvedAsset
+	Unhydrated        []string
+	UnhydratedExtends []string
+	Corrupt           []string
+	SymlinkBlocked    []string
+	MissingLocal      []string
+	ExternalLocal     []string
+	LockStatus        string // "ok" | "not_required" | "missing" | "out_of_sync" | "invalid"
+	LockError         error
 }
 
 // ResolveOptions configures dependency resolution and lockfile reconciliation.
@@ -182,9 +186,25 @@ func (s *Store) InspectDependencies(
 			return err
 		}
 		if parsed.IsLocal {
-			if _, err := os.Stat(parsed.LocalPath); err != nil {
+			if isPathOutsideRoot(projectRoot, parsed.LocalPath) {
+				rep.ExternalLocal = append(rep.ExternalLocal, key)
+			}
+			linfo, lerr := os.Lstat(parsed.LocalPath)
+			if lerr != nil {
 				rep.MissingLocal = append(rep.MissingLocal, key)
 				return nil
+			}
+			if linfo.Mode()&os.ModeSymlink != 0 {
+				rep.SymlinkBlocked = append(rep.SymlinkBlocked, key)
+				rep.MissingLocal = append(rep.MissingLocal, key)
+				return nil
+			}
+			if linfo.IsDir() {
+				if _, herr := HashTree(parsed.LocalPath); errors.Is(herr, ErrSymlinkNotAllowed) {
+					rep.SymlinkBlocked = append(rep.SymlinkBlocked, key)
+					rep.MissingLocal = append(rep.MissingLocal, key)
+					return nil
+				}
 			}
 			rep.Assets[key] = ResolvedAsset{
 				Kind:       kind,
@@ -214,6 +234,11 @@ func (s *Store) InspectDependencies(
 		}
 		actualHash, herr := HashTree(extractedDir)
 		if herr != nil || actualHash != entry.ContentHash {
+			if errors.Is(herr, ErrSymlinkNotAllowed) {
+				rep.SymlinkBlocked = append(rep.SymlinkBlocked, key)
+			} else {
+				rep.Corrupt = append(rep.Corrupt, key)
+			}
 			rep.Unhydrated = append(rep.Unhydrated, key)
 			return nil
 		}
@@ -221,7 +246,7 @@ func (s *Store) InspectDependencies(
 			Kind:       kind,
 			Name:       name,
 			IsRemote:   true,
-			SourcePath: extractedDir,
+			SourcePath: resolveExtractedSourcePath(extractedDir, parsed.Subpath, kind),
 			LockKey:    key,
 			LockEntry:  entry,
 		}
@@ -245,7 +270,14 @@ func (s *Store) InspectDependencies(
 	}
 
 	sort.Strings(rep.Unhydrated)
+	sort.Strings(rep.Corrupt)
+	sort.Strings(rep.SymlinkBlocked)
 	sort.Strings(rep.MissingLocal)
+	sort.Strings(rep.ExternalLocal)
+
+	if len(ps.Extends) > 0 || (lf != nil && len(lf.Extends) > 0) {
+		hasRemote = true
+	}
 
 	if lf == nil {
 		if !hasRemote {
@@ -302,7 +334,8 @@ func (s *Store) ResolveWithOptions(
 		return nil, spec.NewPolicyError("ProjectSpec is nil")
 	}
 
-	if opts.UpdateTarget != "" && opts.UpdateTarget != "*" {
+	isExtendsUpdate := opts.UpdateTarget == "extends" || strings.HasPrefix(opts.UpdateTarget, "extends:")
+	if opts.UpdateTarget != "" && opts.UpdateTarget != "*" && !isExtendsUpdate {
 		if err := validateRemoteUpdateTarget(projectRoot, ps, opts.UpdateTarget, opts.ParseOpts); err != nil {
 			return nil, err
 		}
@@ -313,17 +346,26 @@ func (s *Store) ResolveWithOptions(
 		Dependencies: make(map[string]spec.LockEntry),
 	}
 	if lf != nil {
+		if len(lf.Extends) > 0 {
+			nextLock.Extends = make(map[string]spec.LockEntry, len(lf.Extends))
+			for k, v := range lf.Extends {
+				nextLock.Extends[k] = v
+			}
+		}
 		for k, v := range lf.Dependencies {
 			nextLock.Dependencies[k] = v
 		}
 	}
 
+	depsInitial := lf == nil || lf.FromInitialCompose
+	extendsReconciled := lf != nil && (lf.ExtendsReconciled || isExtendsUpdate)
+
 	// Enforce lockfile consistency on untouched entries when Agentfile.lock exists
 	// and we are not doing a wildcard update.
-	if lf != nil && opts.UpdateTarget != "*" {
+	if !depsInitial && !extendsReconciled && opts.UpdateTarget != "*" {
 		inspector := sourceInspectorFunc(projectRoot, opts.ParseOpts)
 		var verr error
-		if opts.UpdateTarget == "" && opts.ReconcileKey == "" {
+		if opts.UpdateTarget == "" && opts.ReconcileKey == "" && len(lf.Extends) == 0 {
 			verr = spec.VerifyMatches(lf, ps, inspector)
 		} else {
 			filteredSpec, filteredLock := filterSpecAndLock(ps, lf, opts.UpdateTarget, opts.ReconcileKey)
@@ -357,12 +399,16 @@ func (s *Store) ResolveWithOptions(
 			return nil
 		}
 
-		shouldUpdate := lf == nil || opts.UpdateTarget == "*" || opts.UpdateTarget == key || opts.ReconcileKey == key
 		var prevEntry spec.LockEntry
 		var hadPrev bool
-		if lf != nil {
+		if !depsInitial && lf != nil {
 			prevEntry, hadPrev = lf.Dependencies[key]
 		}
+		shouldUpdate := depsInitial ||
+			opts.UpdateTarget == "*" ||
+			opts.UpdateTarget == key ||
+			opts.ReconcileKey == key ||
+			(extendsReconciled && (!hadPrev || prevEntry.Source != parsed.CanonicalURL || prevEntry.Ref != parsed.Ref))
 		var existing *spec.LockEntry
 		if !shouldUpdate && hadPrev {
 			cp := prevEntry
@@ -379,7 +425,7 @@ func (s *Store) ResolveWithOptions(
 			Kind:        kind,
 			Name:        name,
 			IsRemote:    true,
-			SourcePath:  extractedPath,
+			SourcePath:  resolveExtractedSourcePath(extractedPath, parsed.Subpath, kind),
 			LockKey:     key,
 			LockEntry:   entry,
 			LockUpdated: updated,
@@ -425,7 +471,7 @@ func (s *Store) ResolveWithOptions(
 	}
 
 	// Prune removed remote keys from nextLock when creating fresh, updating all, or reconciling.
-	if lf == nil || opts.UpdateTarget == "*" || opts.ReconcileKey != "" {
+	if depsInitial || extendsReconciled || opts.UpdateTarget == "*" || opts.ReconcileKey != "" {
 		for k, oldEntry := range nextLock.Dependencies {
 			if res, ok := results[k]; !ok || !res.IsRemote {
 				delete(nextLock.Dependencies, k)
@@ -780,12 +826,16 @@ func extractTarSafe(tarBytes []byte, subpath, destDir string) error {
 		}
 		if prefix != "" {
 			if name == strings.TrimSuffix(prefix, "/") {
+				if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA {
+					name = path.Base(name)
+				} else {
+					continue
+				}
+			} else if !strings.HasPrefix(name, prefix) {
 				continue
+			} else {
+				name = strings.TrimPrefix(name, prefix)
 			}
-			if !strings.HasPrefix(name, prefix) {
-				continue
-			}
-			name = strings.TrimPrefix(name, prefix)
 		}
 		if name == "" || name == "." || strings.HasPrefix(name, "..") || path.IsAbs(name) {
 			return spec.NewPolicyError("invalid archive path %q", hdr.Name)
@@ -846,6 +896,51 @@ func extractTarSafe(tarBytes []byte, subpath, destDir string) error {
 func (s *Store) extractedPath(contentHash string) string {
 	slug := strings.TrimPrefix(contentHash, "sha256:")
 	return filepath.Join(s.RootDir, "extracted", slug)
+}
+
+func resolveExtractedSourcePath(extractedDir, subpath, kind string) string {
+	if kind != "agent" && kind != "rule" && kind != "extends" {
+		return extractedDir
+	}
+	if subpath != "" {
+		base := filepath.Base(filepath.FromSlash(strings.TrimSuffix(subpath, "/")))
+		if base != "" && base != "." {
+			cand := filepath.Join(extractedDir, base)
+			if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+				return cand
+			}
+		}
+	}
+	if kind == "extends" {
+		cand := filepath.Join(extractedDir, "Agentfile.yaml")
+		if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+			return cand
+		}
+	}
+	entries, err := os.ReadDir(extractedDir)
+	if err == nil && len(entries) == 1 && !entries[0].IsDir() {
+		return filepath.Join(extractedDir, entries[0].Name())
+	}
+	return extractedDir
+}
+
+func isPathOutsideRoot(projectRoot, targetPath string) bool {
+	if projectRoot == "" || targetPath == "" {
+		return false
+	}
+	absRoot, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return false
+	}
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absRoot, absTarget)
+	if err != nil {
+		return true
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel)
 }
 
 func (s *Store) touchLastUsed(contentHash string) {

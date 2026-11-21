@@ -33,6 +33,7 @@ func NewPolicyError(format string, args ...any) error {
 // ProjectSpec is the parsed representation of Agentfile.yaml (version 1).
 type ProjectSpec struct {
 	Version       int                         `yaml:"version"`
+	Extends       ExtendsList                 `yaml:"extends,omitempty"`
 	Targets       []string                    `yaml:"targets"`
 	MCP           map[string]MCPServerSpec    `yaml:"mcp,omitempty"`
 	Skills        []AssetSpec                 `yaml:"skills,omitempty"`
@@ -40,6 +41,38 @@ type ProjectSpec struct {
 	Rules         []RuleSpec                  `yaml:"rules,omitempty"`
 	Settings      SettingsSpec                `yaml:"settings,omitempty"`
 	TargetsConfig map[string]TargetConfigSpec `yaml:"targets_config,omitempty"`
+}
+
+// ExtendsList accepts either a single SourceSpec (string or {git, ref, path}) or a non-empty list of SourceSpecs.
+type ExtendsList []SourceSpec
+
+// UnmarshalYAML decodes a scalar/mapping source or a sequence of sources into ExtendsList.
+func (el *ExtendsList) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.SequenceNode:
+		if len(value.Content) == 0 {
+			return NewPolicyError("extends cannot be an empty list")
+		}
+		out := make([]SourceSpec, 0, len(value.Content))
+		for _, child := range value.Content {
+			var src SourceSpec
+			if err := src.UnmarshalYAML(child); err != nil {
+				return err
+			}
+			out = append(out, src)
+		}
+		*el = out
+		return nil
+	case yaml.ScalarNode, yaml.MappingNode:
+		var src SourceSpec
+		if err := src.UnmarshalYAML(value); err != nil {
+			return err
+		}
+		*el = ExtendsList{src}
+		return nil
+	default:
+		return NewPolicyError("extends must be a source or list of sources")
+	}
 }
 
 // MCPServerSpec defines an MCP server entry.
@@ -272,8 +305,16 @@ func isValidEnvVarName(name string) bool {
 
 // Lockfile represents Agentfile.lock (version 1).
 type Lockfile struct {
-	Version      int                  `yaml:"version"`
-	Dependencies map[string]LockEntry `yaml:"dependencies"`
+	Version            int                  `yaml:"version"`
+	Extends            map[string]LockEntry `yaml:"extends,omitempty"`
+	Dependencies       map[string]LockEntry `yaml:"dependencies"`
+	FromInitialCompose bool                 `yaml:"-"`
+	ExtendsReconciled  bool                 `yaml:"-"`
+}
+
+// HasRemoteEntries reports whether the lockfile contains any pinned dependencies or remote extends bases.
+func (lf *Lockfile) HasRemoteEntries() bool {
+	return lf != nil && (len(lf.Dependencies) > 0 || len(lf.Extends) > 0)
 }
 
 // LockEntry records a pinned remote dependency.
