@@ -7,7 +7,16 @@ Committed at the repository root. Unknown YAML fields and multi-document YAML st
 ### Top-Level Fields
 
 * `version`: Integer `1` (required).
-* `targets`: Non-empty list of targets from `claude`, `opencode`, `gemini`, `cursor`, `codex`, `copilot`, `windsurf` (required).
+* `extends`: Optional base manifest source or ordered list of sources (`./path/to/Agentfile.yaml`, `<git_url>[#<ref>][//<subpath>]`, or `{git, ref, path}`) up to depth `8`. When `extends` is set, `targets` may be inherited from a base manifest.
+  * **Relative path rebasing:** `./...` and `../...` `SourceSpec` paths inside a local base manifest resolve relative to that base manifest's directory; `./...` paths inside a remote Git base manifest rewrite to commit-pinned Git sources inside the base repository (rejecting `..` escapes above the repo root).
+  * **Merge & monotonic security rules (left-to-right across bases, then child `Agentfile.yaml`):**
+    * `targets`: Last non-empty list wins.
+    * `skills`, `agents`, `rules`: Upsert by `name` (`agentfile add --replace` overrides an inherited entry; `agentfile remove` rejects inherited-only entries and reverts local overrides back to the base).
+    * `mcp`: Wholesale replacement per server key.
+    * `settings.permissions.allow_commands`: Deduplicated union.
+    * `settings.permissions.deny_commands` and enforced/PreToolUse `settings.hooks`: Monotonic additive union (later layers cannot drop inherited deny rules or enforced hooks).
+    * `targets_config.<target>`: Monotonic non-downgrade for `load_global: false`, `on_unsupported: fail`, and `on_isolation_unsupported: fail`.
+* `targets`: Non-empty list of targets from `claude`, `opencode`, `gemini`, `cursor`, `codex`, `copilot`, `windsurf` (required unless inherited via `extends`).
 * `mcp`: Map of MCP server definitions keyed by slug (`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`).
   * `transport`: `stdio`, `http`, or `sse`.
   * `stdio` fields: `command`, `args`, `env`.
@@ -74,10 +83,16 @@ When `agentfile init --import` reverse-compiles existing repository configuratio
 
 ## 2. `Agentfile.lock` (`version: 1`)
 
-Sorted-key YAML lockfile pinning remote Git dependencies by `<kind>:<name>` (e.g., `skill:k8s-hardening`):
+Sorted-key YAML lockfile pinning remote Git dependencies by `<kind>:<name>` (e.g., `skill:k8s-hardening`) and optional remote `extends` base manifests by `<canonical_url>[//<subpath>]`:
 
 ```yaml
 version: 1
+extends:
+  https://github.com/org/ai-base.git//base/Agentfile.yaml:
+    source: https://github.com/org/ai-base.git
+    ref: v1.0.0
+    commit_sha: <40-char-sha>
+    content_hash: sha256:<64-char-hex>
 dependencies:
   skill:k8s-hardening:
     source: https://github.com/org/agent-skills.git

@@ -44,10 +44,12 @@ See [examples/starter/README.md](examples/starter/README.md) and [examples/start
 | `agentfile diff` | `--targets`, `--stat`, `--name-only`, `--check`, `--fetch` | Previews secret-redacted unified diffs (or diffstat/paths) between `Agentfile.yaml` and workspace files without modifying disk or `Agentfile.lock`. |
 | `agentfile add` | `skill\|agent\|rule\|mcp`, `--replace`, `--no-sync`, `--on-conflict`, `--allow-external-local` | Adds or replaces an entry in `Agentfile.yaml` (preserving comments), rejects literal secrets, and reconciles `Agentfile.lock` + workspace via sync. |
 | `agentfile remove` | `<skill\|agent\|rule\|mcp> <name>`, `--no-sync`, `--on-conflict`, `--allow-external-local` | Removes an entry from `Agentfile.yaml` and prunes orphaned lockfile entries and workspace artifacts. |
-| `agentfile upgrade` | `[<kind>:<name> \| <kind> <name>]`, `--targets`, `--dry-run`, `--on-conflict`, `--force`, `--allow-external-local`, `--json` | Refreshes remote Git dependencies, updates `Agentfile.lock`, syncs targets, and reports per-dependency lock deltas. |
+| `agentfile upgrade` | `[<kind>:<name> \| <kind> <name> \| extends[:<url>]]`, `--targets`, `--dry-run`, `--on-conflict`, `--force`, `--allow-external-local`, `--json` | Refreshes remote Git dependencies and `extends:` bases, updates `Agentfile.lock`, syncs targets, and reports lock deltas. |
+| `agentfile audit` | `--strict`, `--no-store`, `--json` | Runs a deterministic offline security and supply-chain audit separating executable inventory from secret-redacted findings. |
+| `agentfile shell-hook` | `<zsh\|bash\|fish>`, `--targets`, `--only-isolated` | Emits opt-in shell wrapper functions routing bare target CLI calls through `agentfile run` inside `agentfile` repositories. |
 | `agentfile doctor` | `--json` | Validates `Agentfile.yaml` against JSON Schema v1, checks `Agentfile.lock`, probes installed target CLIs (`MinVersion` / `MinIsolationVersion`), prints resolved config layers, and warns on shadowing global MCPs, skills, rules, and agents. |
-| `agentfile run` | `--load-global`, `--no-global`, `--sync`, `--no-sync`, `--dry-run`, `--json` | Syncs target configuration and launches `<target>` (forwarding all arguments after `<target>` verbatim) with optional runtime global isolation. |
-| `agentfile clean` | `--dry-run`, `--targets`, `--cache`, `--max-age`, `--json` | Removes tracked workspace artifacts/JSONC patches/excludes, or prunes stale extracted cache entries when `--cache` is passed. |
+| `agentfile run` | `--load-global`, `--no-global`, `--sync`, `--no-sync`, `--no-cache`, `--project-root`, `--if-configured`, `--only-isolated`, `--dry-run`, `--json` | Syncs target configuration (with a `<5ms` per-target input-digest fast path) and launches `<target>` with optional runtime global isolation. |
+| `agentfile clean` | `--dry-run`, `--targets`, `--cache`, `--max-age`, `--json` | Removes tracked workspace artifacts/JSONC patches/excludes/run-cache, or prunes stale extracted cache entries when `--cache` is passed. |
 
 Exit codes: `0` success, `1` I/O or runtime error, `2` validation, security policy, lockfile mismatch, conflict failure, or CLI usage error.
 
