@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/bettertux007/agentfile/security/advisories/new
     about: Report a security vulnerability privately per SECURITY.md
   - name: Documentation
-    url: https://bettertux007.github.io/agentfile/
-    about: Browse the CLI, Configuration, and Architecture documentation
+    url: https://github.com/bettertux007/agentfile/tree/main/docs
+    about: Browse the CLI, Configuration, and Architecture documentation in docs/

@@ -121,8 +121,8 @@ eval "$(agentfile shell-hook zsh)"
 
 ## Next Steps
 
-* [Brownfield Import (`init --import`)](/guides/brownfield-import)
-* [7 Targets, Shared Ownership & Isolation](/guides/targets-and-sharing)
-* [Security, `extends:` Composition & Env Lowering](/guides/security-and-env)
-* [CLI Reference](/cli)
-* [Configuration & Lockfile Reference](/configuration)
+* [Brownfield Import (`init --import`)](guides/brownfield-import.md)
+* [7 Targets, Shared Ownership & Isolation](guides/targets-and-sharing.md)
+* [Security, `extends:` Composition & Env Lowering](guides/security-and-env.md)
+* [CLI Reference](cli.md)
+* [Configuration & Lockfile Reference](configuration.md)

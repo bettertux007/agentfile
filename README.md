@@ -1,7 +1,6 @@
 # agentfile
 
 [![CI](https://github.com/bettertux007/agentfile/actions/workflows/ci.yml/badge.svg)](https://github.com/bettertux007/agentfile/actions/workflows/ci.yml)
-[![Docs](https://github.com/bettertux007/agentfile/actions/workflows/docs.yml/badge.svg)](https://bettertux007.github.io/agentfile/)
 [![Go Reference](https://pkg.go.dev/badge/github.com/bettertux007/agentfile.svg)](https://pkg.go.dev/github.com/bettertux007/agentfile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)](LICENSE)
 
@@ -122,7 +121,7 @@ Agentfile.lock ──► store.Resolve (locks / --update) ───────�
 
 ## Further Documentation
 
-* [docs/README.md](docs/README.md) — Documentation index
+* [docs/README.md](docs/README.md) — Documentation index & guides ([Getting Started](docs/getting-started.md), [Brownfield Import](docs/guides/brownfield-import.md), [Targets & Shared Ownership](docs/guides/targets-and-sharing.md), [Security & `extends:`](docs/guides/security-and-env.md), [Architecture](docs/architecture.md))
 * [docs/cli.md](docs/cli.md) — Full CLI command, flag, and exit-code reference
 * [docs/configuration.md](docs/configuration.md) — `Agentfile.yaml`, `Agentfile.lock`, and `.agentfile/config.yaml` reference
 * [SPEC.md](SPEC.md) — Technical specification and architecture contracts
@@ -142,7 +141,6 @@ make test-race  # Run tests with race detector
 make coverage   # Measure statement coverage
 make lint       # Run go vet + gofmt (or golangci-lint)
 make check      # Run lint, test-race, and Windows/Linux cross-compile checks
-make docs-build # Build the VitePress static documentation site in docs/
 make build-all  # Build release binaries into dist/
 ```
 
