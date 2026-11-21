@@ -10,7 +10,7 @@ LDFLAGS := -s -w \
 	-X github.com/bettertux007/agentfile/internal/cli.Commit=$(COMMIT) \
 	-X github.com/bettertux007/agentfile/internal/cli.Date=$(DATE)
 
-.PHONY: all build build-all install test test-race coverage vet fmt lint check clean
+.PHONY: all build build-all install test test-race coverage vet fmt lint check clean docs-dev docs-build
 
 all: build
 
@@ -58,4 +58,10 @@ check: lint test-race
 	GOOS=linux go build ./...
 
 clean:
-	rm -rf $(BINARY) $(DIST_DIR) coverage.out internal_cov.out
+	rm -rf $(BINARY) $(DIST_DIR) coverage.out internal_cov.out docs/.vitepress/dist docs/.vitepress/cache
+
+docs-dev:
+	npm run docs:dev --prefix docs
+
+docs-build:
+	npm run docs:build --prefix docs

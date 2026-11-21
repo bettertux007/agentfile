@@ -6,6 +6,7 @@ Thank you for contributing to `agentfile`! This document outlines the developmen
 
 * **Go `1.26+`**
 * **Git**
+* **Node.js `22+`** (optional, only required when editing the VitePress documentation site under `docs/`)
 
 ## Development Commands
 
@@ -19,6 +20,7 @@ make coverage     # Generate coverage.out and print aggregate statement coverage
 make lint         # Run go vet and gofmt check (or golangci-lint if installed)
 make check        # Run lint, test-race, and Windows/Linux cross-compile checks
 make fmt          # Format all Go source files with gofmt
+make docs-build   # Build the VitePress static documentation site in docs/
 ```
 
 ## Architectural Invariants
@@ -47,4 +49,5 @@ Every pull request must preserve the project's core invariants (see [SPEC.md](SP
 
 - [ ] `make fmt` and `make check` pass with zero warnings or errors.
 - [ ] `make coverage` maintains `>= 85%` aggregate statement coverage.
+- [ ] If documentation under `docs/` was modified, `make docs-build` passes with zero broken links.
 - [ ] Commit messages follow Conventional Commits (`feat(scope): ...`, `fix(scope): ...`, `docs: ...`).
