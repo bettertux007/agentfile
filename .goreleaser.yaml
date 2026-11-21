@@ -35,6 +35,7 @@ archives:
         formats:
           - zip
     files:
+      - LICENSE
       - README.md
       - SPEC.md
 

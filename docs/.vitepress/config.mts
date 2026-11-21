@@ -73,7 +73,8 @@ export default defineConfig({
       text: 'Edit this page on GitHub'
     },
     footer: {
-      message: 'agentfile — Declarative compiler for AI coding agents'
+      message: 'Released under the MIT License.',
+      copyright: 'Copyright © 2026 bettertux007'
     }
   }
 })

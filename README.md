@@ -1,8 +1,27 @@
 # agentfile
 
+[![CI](https://github.com/bettertux007/agentfile/actions/workflows/ci.yml/badge.svg)](https://github.com/bettertux007/agentfile/actions/workflows/ci.yml)
+[![Docs](https://github.com/bettertux007/agentfile/actions/workflows/docs.yml/badge.svg)](https://bettertux007.github.io/agentfile/)
+[![Go Reference](https://pkg.go.dev/badge/github.com/bettertux007/agentfile.svg)](https://pkg.go.dev/github.com/bettertux007/agentfile)
+[![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)](LICENSE)
+
 Declarative project compiler and dependency hydrator for AI coding agents (**Claude Code**, **OpenCode**, **Gemini CLI**, **Cursor**, **Codex CLI**, **GitHub Copilot**, and **Windsurf**).
 
 Define project-scoped MCP servers, skills, subagents, instructions, permissions, and lifecycle hooks once in `Agentfile.yaml` (`version: 1`). `agentfile` resolves remote Git dependencies into a local cache tracked by `Agentfile.lock` (`version: 1`) and compiles isolated, project-level configurations for each target agent without mutating global config files (`~/.claude.json`, `~/.config/opencode/`, `~/.gemini/settings.json`, `~/.cursor/`, `~/.codex/`, `~/.copilot/`, `~/.codeium/windsurf/`, `~/.agents/skills/`).
+
+## Installation
+
+```sh
+# Install with Go 1.26+
+go install github.com/bettertux007/agentfile/cmd/agentfile@latest
+
+# Or clone and install to ~/.local/bin
+git clone https://github.com/bettertux007/agentfile.git
+cd agentfile
+make install
+```
+
+Prebuilt binaries for macOS, Linux, and Windows (`amd64` and `arm64`) are also published on [GitHub Releases](https://github.com/bettertux007/agentfile/releases).
 
 ## Quickstart
 
@@ -111,6 +130,9 @@ Agentfile.lock ──► store.Resolve (locks / --update) ───────�
 * [internal/adapters/README.md](internal/adapters/README.md) — Adapter contract and contribution guide
 * [schemas/README.md](schemas/README.md) — Manifest JSON Schema v1 details
 * [examples/starter/README.md](examples/starter/README.md) — Starter `Agentfile.yaml` walkthrough
+* [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution guidelines and PR checklist
+* [SECURITY.md](SECURITY.md) — Security policy and vulnerability reporting
+* [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant Code of Conduct
 
 ## Development
 
@@ -120,5 +142,10 @@ make test-race  # Run tests with race detector
 make coverage   # Measure statement coverage
 make lint       # Run go vet + gofmt (or golangci-lint)
 make check      # Run lint, test-race, and Windows/Linux cross-compile checks
+make docs-build # Build the VitePress static documentation site in docs/
 make build-all  # Build release binaries into dist/
 ```
+
+## License
+
+Released under the [MIT License](LICENSE).

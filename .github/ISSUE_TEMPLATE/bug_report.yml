@@ -1,0 +1,44 @@
+name: Bug Report
+description: Report a bug, compiler error, or unexpected target output in agentfile
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue! Please do not include literal API keys or secrets in your report.
+
+  - type: input
+    id: version
+    attributes:
+      label: agentfile version
+      description: Output of `agentfile --version`
+      placeholder: "agentfile version v0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: OS & Target Agent CLI(s)
+      description: Operating system and target agent CLI versions (e.g., macOS arm64, claude 2.1.x, opencode 2.3.x)
+      placeholder: "macOS 15 arm64, claude 2.1.278"
+    validations:
+      required: true
+
+  - type: textarea
+    id: manifest
+    attributes:
+      label: Minimal Agentfile.yaml & Steps to Reproduce
+      description: Provide a minimal `Agentfile.yaml` and the exact `agentfile` command run.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual vs. Expected Behavior
+      description: What happened (including exit code and stderr output) versus what you expected?
+    validations:
+      required: true

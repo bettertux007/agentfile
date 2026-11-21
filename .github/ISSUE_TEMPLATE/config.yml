@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Report
+    url: https://github.com/bettertux007/agentfile/security/advisories/new
+    about: Report a security vulnerability privately per SECURITY.md
+  - name: Documentation
+    url: https://bettertux007.github.io/agentfile/
+    about: Browse the CLI, Configuration, and Architecture documentation
