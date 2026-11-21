@@ -156,3 +156,76 @@ func TestResolveGlobalPathAndExitCodeError(t *testing.T) {
 		t.Fatalf("expected empty version on failing binary, got %q", got)
 	}
 }
+
+func TestProbeBinaryVersionCachedAndExecuteWithOptions(t *testing.T) {
+	cacheRoot := t.TempDir()
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "claude")
+	pkgPath := filepath.Join(binDir, "package.json")
+
+	_ = os.WriteFile(pkgPath, []byte(`{"version":"2.1.0"}`), 0o644)
+	_ = os.WriteFile(binPath, []byte("#!/bin/sh\necho '2.1.0'\n"), 0o755)
+
+	// 1. First probe populates bin-versions.json.
+	v1 := ProbeBinaryVersionCached(context.Background(), cacheRoot, binPath, true)
+	if v1 != "2.1.0" {
+		t.Fatalf("expected 2.1.0, got %q", v1)
+	}
+	if _, err := os.Stat(filepath.Join(cacheRoot, "bin-versions.json")); err != nil {
+		t.Fatalf("expected bin-versions.json created: %v", err)
+	}
+
+	// 2. Overwrite script with identical size and mtime -> cache hit returns "2.1.0".
+	origInfo, _ := os.Stat(binPath)
+	_ = os.WriteFile(binPath, []byte("#!/bin/sh\necho '9.9.9'\n"), 0o755)
+	_ = os.Chtimes(binPath, origInfo.ModTime(), origInfo.ModTime())
+	vHit := ProbeBinaryVersionCached(context.Background(), cacheRoot, binPath, true)
+	if vHit != "2.1.0" {
+		t.Fatalf("expected cached 2.1.0 on identical size/mtime, got %q", vHit)
+	}
+
+	// 3. useCache=false bypasses cache and reads "9.9.9".
+	vBypass := ProbeBinaryVersionCached(context.Background(), cacheRoot, binPath, false)
+	if vBypass != "9.9.9" {
+		t.Fatalf("expected 9.9.9 when useCache=false, got %q", vBypass)
+	}
+
+	// 4. Touching package.json invalidates cache and updates to "9.9.9".
+	_ = os.WriteFile(pkgPath, []byte(`{"version":"9.9.9","updated":true}`), 0o644)
+	vInvalidate := ProbeBinaryVersionCached(context.Background(), cacheRoot, binPath, true)
+	if vInvalidate != "9.9.9" {
+		t.Fatalf("expected cache invalidation on package.json change, got %q", vInvalidate)
+	}
+
+	// 5. Dynamic version-manager shim path bypasses cache.
+	shimDir := filepath.Join(t.TempDir(), ".asdf", "shims")
+	_ = os.MkdirAll(shimDir, 0o755)
+	shimBin := filepath.Join(shimDir, "claude")
+	_ = os.WriteFile(shimBin, []byte("#!/bin/sh\necho '3.0.0'\n"), 0o755)
+	if got := ProbeBinaryVersionCached(context.Background(), cacheRoot, shimBin, true); got != "3.0.0" {
+		t.Fatalf("expected shim probe 3.0.0, got %q", got)
+	}
+
+	// 6. ExecuteWithOptions sets AGENTFILE_ROOT, honors LaunchDir, and respects QuietBanner.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	mpr := &mockProcessRunner{}
+	var stderr bytes.Buffer
+	plan := &adapters.LaunchPlan{Target: "claude", Mode: adapters.IsolationNone}
+	err := ExecuteWithOptions(context.Background(), mpr, ExecuteOptions{
+		ProjectRoot: "/repo",
+		LaunchDir:   "/repo/services/api",
+		QuietBanner: true,
+	}, claude.New(), plan, []string{"--version"}, true, cacheRoot, &stderr, false)
+	if err != nil {
+		t.Fatalf("ExecuteWithOptions failed: %v", err)
+	}
+	if mpr.dir != "/repo/services/api" {
+		t.Fatalf("expected LaunchDir /repo/services/api, got %s", mpr.dir)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected QuietBanner to suppress stderr banner, got %q", stderr.String())
+	}
+	if !strings.Contains(strings.Join(mpr.env, "\n"), "AGENTFILE_ROOT=/repo") {
+		t.Fatalf("expected AGENTFILE_ROOT=/repo in env")
+	}
+}

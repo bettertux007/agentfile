@@ -73,6 +73,7 @@ func SyncExcludes(projectRoot string, relPaths []string, enabled bool) ([]string
 		".agentfile/sync.lock",
 		".agentfile/commit-journal.json",
 		".agentfile/backups/",
+		".agentfile/run-cache/",
 	} {
 		addEntry(rt)
 	}
@@ -102,6 +103,43 @@ func ClearExcludes(projectRoot string) ([]string, error) {
 		return nil, nil
 	}
 	return updateExcludeFile(rc, nil)
+}
+
+// ResolveExcludePath returns the worktree-safe <git-common-dir>/info/exclude path
+// without spawning a git subprocess, or "" if projectRoot is not a Git repository.
+func ResolveExcludePath(projectRoot string) string {
+	dotGit := filepath.Join(projectRoot, ".git")
+	info, err := os.Stat(dotGit)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		return filepath.Join(dotGit, "info", "exclude")
+	}
+	raw, err := os.ReadFile(dotGit)
+	if err != nil {
+		return ""
+	}
+	line := strings.TrimSpace(string(raw))
+	if !strings.HasPrefix(line, "gitdir:") {
+		return ""
+	}
+	gitDir := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Clean(filepath.Join(projectRoot, gitDir))
+	}
+	commonDir := gitDir
+	if commonBytes, cerr := os.ReadFile(filepath.Join(gitDir, "commondir")); cerr == nil {
+		relCommon := strings.TrimSpace(string(commonBytes))
+		if relCommon != "" {
+			if filepath.IsAbs(relCommon) {
+				commonDir = filepath.Clean(relCommon)
+			} else {
+				commonDir = filepath.Clean(filepath.Join(gitDir, relCommon))
+			}
+		}
+	}
+	return filepath.Join(commonDir, "info", "exclude")
 }
 
 func updateExcludeFile(rc *repoContext, entries []string) ([]string, error) {

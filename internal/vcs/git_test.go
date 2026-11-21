@@ -74,6 +74,17 @@ func TestSyncAndClearExcludesWorktreeAndTracked(t *testing.T) {
 	}
 
 	// Remove wt2 directory & verify prunable worktree block gets pruned on next sync.
+	if got := ResolveExcludePath(mainDir); got != excludePath {
+		t.Fatalf("expected ResolveExcludePath(mainDir)=%s, got %s", excludePath, got)
+	}
+	evalExclude, _ := filepath.EvalSymlinks(excludePath)
+	evalWtExclude, _ := filepath.EvalSymlinks(ResolveExcludePath(wtDir))
+	if evalWtExclude != evalExclude {
+		t.Fatalf("expected ResolveExcludePath(wtDir)=%s, got %s", evalExclude, evalWtExclude)
+	}
+	if got := ResolveExcludePath(t.TempDir()); got != "" {
+		t.Fatalf("expected empty ResolveExcludePath outside git repo, got %s", got)
+	}
 	if err := os.RemoveAll(wtDir); err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +124,7 @@ func TestSyncExcludesNarrowsAgentfileRuntimePaths(t *testing.T) {
 		".agentfile/sync.lock",
 		".agentfile/commit-journal.json",
 		".agentfile/backups/20260101T000000Z/file.txt",
+		".agentfile/run-cache/claude.json",
 		".agentfile/imported/skills/foo/SKILL.md",
 	} {
 		abs := filepath.Join(dir, filepath.FromSlash(rel))
@@ -139,6 +151,7 @@ func TestSyncExcludesNarrowsAgentfileRuntimePaths(t *testing.T) {
 		"/.agentfile/sync.lock",
 		"/.agentfile/commit-journal.json",
 		"/.agentfile/backups/",
+		"/.agentfile/run-cache/",
 		"/AGENTS.md",
 	} {
 		if !strings.Contains(txt, want) {

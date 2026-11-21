@@ -159,6 +159,72 @@ func ContainsLiteralSecret(s string) bool {
 	return RedactSecrets(s) != s
 }
 
+// ContainsHighConfidenceSecret reports whether s contains a high-confidence literal
+// credential signature (PEM private key, HTTP Bearer/Basic token, URL userinfo password,
+// or known token prefix such as ghp_, sk-, AKIA) while ignoring env-var placeholders
+// and generic key-value names in prose descriptions.
+func ContainsHighConfidenceSecret(s string) bool {
+	if s == "" {
+		return false
+	}
+	phPrefix := "__AF_PH_"
+	for strings.Contains(s, phPrefix) {
+		phPrefix += "X_"
+	}
+	var tokens []string
+	addToken := func(val string) string {
+		tok := fmt.Sprintf("%s%d__", phPrefix, len(tokens))
+		tokens = append(tokens, val)
+		return tok
+	}
+	masked := rePurePlaceholder.ReplaceAllStringFunc(s, func(m string) string {
+		return addToken(m)
+	})
+	masked = reDefaultPlaceholder.ReplaceAllStringFunc(masked, func(m string) string {
+		sub := reDefaultPlaceholder.FindStringSubmatch(m)
+		if len(sub) != 3 {
+			return m
+		}
+		varName, defVal := sub[1], sub[2]
+		redactedDef := redactHighConfidenceBody(defVal, phPrefix)
+		return addToken("${" + varName + ":-" + redactedDef + "}")
+	})
+	out := redactHighConfidenceBody(masked, phPrefix)
+	for i := len(tokens) - 1; i >= 0; i-- {
+		tok := fmt.Sprintf("%s%d__", phPrefix, i)
+		out = strings.ReplaceAll(out, tok, tokens[i])
+	}
+	return out != s
+}
+
+func redactHighConfidenceBody(s, phPrefix string) string {
+	out := rePEMPrivateKey.ReplaceAllString(s, redactedMarker)
+	out = reAuthScheme.ReplaceAllStringFunc(out, func(m string) string {
+		sub := reAuthScheme.FindStringSubmatch(m)
+		if len(sub) != 4 {
+			return m
+		}
+		scheme, ws, tok := sub[1], sub[2], sub[3]
+		if tok == redactedMarker || isPurePlaceholderToken(tok, phPrefix) {
+			return m
+		}
+		return scheme + ws + redactedMarker
+	})
+	out = reURLUserInfo.ReplaceAllStringFunc(out, func(m string) string {
+		sub := reURLUserInfo.FindStringSubmatch(m)
+		if len(sub) != 4 {
+			return m
+		}
+		scheme, user, pass := sub[1], sub[2], sub[3]
+		if pass == redactedMarker || isPurePlaceholderToken(pass, phPrefix) {
+			return m
+		}
+		return scheme + user + ":" + redactedMarker + "@"
+	})
+	out = reKnownPrefixes.ReplaceAllString(out, redactedMarker)
+	return out
+}
+
 func redactBody(s, phPrefix string) string {
 	out := rePEMPrivateKey.ReplaceAllString(s, redactedMarker)
 

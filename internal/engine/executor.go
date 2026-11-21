@@ -357,6 +357,7 @@ func Clean(projectRoot string, targets []string, dryRun bool) (*PlanSummary, err
 				_ = removeIfEffectivelyEmpty(filepath.Join(projectRoot, filepath.FromSlash(d)))
 			}
 			delete(st.Targets, t)
+			_ = os.Remove(RunCachePath(projectRoot, t))
 		}
 	}
 
@@ -403,6 +404,7 @@ func Clean(projectRoot string, targets []string, dryRun bool) (*PlanSummary, err
 		}
 		if len(st.Targets) == 0 && len(st.Shared) == 0 {
 			_ = os.Remove(StatePath(projectRoot))
+			_ = os.RemoveAll(filepath.Join(projectRoot, ".agentfile", "run-cache"))
 			w, err := vcs.ClearExcludes(projectRoot)
 			if err != nil {
 				return nil, err

@@ -473,6 +473,13 @@ func TestContainsLiteralSecret(t *testing.T) {
 			t.Errorf("expected ContainsLiteralSecret(%q) == false", s)
 		}
 	}
+
+	if !ContainsHighConfidenceSecret("ghp_1234567890abcdef") || !ContainsHighConfidenceSecret("https://user:secret@host/repo.git") {
+		t.Errorf("expected ContainsHighConfidenceSecret to detect token prefix and URL password")
+	}
+	if ContainsHighConfidenceSecret(`description: "configure auth: oauth or token: prompt"`) || ContainsHighConfidenceSecret("https://user:${GIT_PASS}@host/repo.git") {
+		t.Errorf("expected ContainsHighConfidenceSecret to ignore prose KV words and URL placeholders")
+	}
 }
 
 func TestDiffAndTreeEdgeCases(t *testing.T) {
