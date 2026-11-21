@@ -90,9 +90,13 @@ func normalizeUpgradeTarget(args []string) (string, error) {
 	case 0:
 		return "*", nil
 	case 1:
-		kind, name, ok := strings.Cut(args[0], ":")
+		arg := strings.TrimSpace(args[0])
+		if arg == "extends" {
+			return "extends", nil
+		}
+		kind, name, ok := strings.Cut(arg, ":")
 		if !ok || strings.TrimSpace(kind) == "" || strings.TrimSpace(name) == "" {
-			return "", spec.NewPolicyError("invalid upgrade target %q (expected <kind>:<name> or <kind> <name>)", args[0])
+			return "", spec.NewPolicyError("invalid upgrade target %q (expected <kind>:<name>, <kind> <name>, or extends[:<url>])", args[0])
 		}
 		return strings.TrimSpace(kind) + ":" + strings.TrimSpace(name), nil
 	case 2:

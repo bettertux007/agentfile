@@ -16,6 +16,8 @@ type workspaceInspection struct {
 	ManifestValid bool
 	SchemaErrors  []string
 	Warnings      []string
+	RawSpec       *spec.ProjectSpec
+	Composed      *spec.ComposedManifest
 	ProjectSpec   *spec.ProjectSpec
 	Lockfile      *spec.Lockfile
 	LockStatus    string // "ok" | "not_required" | "missing" | "out_of_sync" | "invalid" | "not_checked"
@@ -42,10 +44,11 @@ func inspectWorkspace(workDir string, isTTY func() bool, parseOpts store.ParseOp
 		if err := schemas.ValidateAgentfileV1(rawManifest); err != nil {
 			ins.SchemaErrors = append(ins.SchemaErrors, fmt.Sprintf("JSON schema: %v", err))
 		}
-		parsed, perr := spec.ParseFile(manifestPath)
+		parsed, perr := spec.ParseRawFile(manifestPath)
 		if perr != nil {
 			ins.SchemaErrors = append(ins.SchemaErrors, fmt.Sprintf("spec parser: %v", perr))
 		} else {
+			ins.RawSpec = parsed
 			ins.ProjectSpec = parsed
 		}
 		ins.ManifestValid = len(ins.SchemaErrors) == 0
@@ -69,7 +72,7 @@ func inspectWorkspace(workDir string, isTTY func() bool, parseOpts store.ParseOp
 		}
 	}
 
-	if ins.ProjectSpec != nil {
+	if ins.RawSpec != nil {
 		lockPath := filepath.Join(workDir, "Agentfile.lock")
 		lf, lerr := spec.LoadLock(lockPath)
 		if lerr != nil && !errors.Is(lerr, os.ErrNotExist) {
@@ -86,10 +89,13 @@ func inspectWorkspace(workDir string, isTTY func() bool, parseOpts store.ParseOp
 			if err != nil {
 				return nil, err
 			}
-			depRep, derr := st.InspectDependencies(workDir, ins.ProjectSpec, lf, parseOpts)
+			composed, depRep, derr := st.InspectComposedManifest(workDir, ins.RawSpec, lf, parseOpts)
 			if derr != nil {
 				ins.SchemaErrors = append(ins.SchemaErrors, derr.Error())
+				ins.ManifestValid = false
 			} else {
+				ins.Composed = composed
+				ins.ProjectSpec = composed.Effective
 				ins.Deps = depRep
 				ins.LockStatus = depRep.LockStatus
 				ins.LockError = depRep.LockError

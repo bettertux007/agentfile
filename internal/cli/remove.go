@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/bettertux007/agentfile/internal/spec"
 	"github.com/bettertux007/agentfile/internal/store"
@@ -28,6 +29,27 @@ func newRemoveCmd(ec *execContext) *cobra.Command {
 				return err
 			}
 
+			var revertOrigin *spec.LayerOrigin
+			if rawSpec, perr := spec.ParseRaw(bytes.NewReader(origBytes)); perr == nil && len(rawSpec.Extends) > 0 {
+				if st, serr := store.NewDefaultStore(); serr == nil {
+					lf, _ := spec.LoadLock(filepath.Join(ec.workDir, "Agentfile.lock"))
+					cm, _, cerr := st.InspectComposedManifest(ec.workDir, rawSpec, lf, store.ParseOptions{
+						AllowExternalLocal: allowExternalLocal,
+						AllowFileScheme:    os.Getenv("AGENTFILE_ALLOW_FILE_GIT") == "1",
+					})
+					if cerr == nil && cm != nil {
+						state, orig := cm.EntryProvenance(kind, name)
+						switch state {
+						case spec.ProvenanceInheritedOnly:
+							return spec.NewPolicyError("cannot remove %s %q: inherited from %s (override it in Agentfile.yaml instead)", kind, name, orig.DisplayName())
+						case spec.ProvenanceOverriddenLocally:
+							cp := orig
+							revertOrigin = &cp
+						}
+					}
+				}
+			}
+
 			candidateBytes, err := spec.RemoveEntry(origBytes, kind, name)
 			if err != nil {
 				return err
@@ -36,9 +58,13 @@ func newRemoveCmd(ec *execContext) *cobra.Command {
 			if err := schemas.ValidateAgentfileV1(candidateBytes); err != nil {
 				return spec.NewPolicyError("invalid Agentfile.yaml: %v", err)
 			}
-			candidateSpec, err := spec.Parse(bytes.NewReader(candidateBytes))
+			candidateSpec, err := spec.ParseRaw(bytes.NewReader(candidateBytes))
 			if err != nil {
 				return err
+			}
+
+			if revertOrigin != nil {
+				fmt.Fprintf(ec.errOut, "note: removed local override for %s %q; reverting to inherited definition from %s\n", kind, name, revertOrigin.DisplayName())
 			}
 
 			if noSync {

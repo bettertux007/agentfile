@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/bettertux007/agentfile/internal/adapters"
@@ -96,11 +97,11 @@ func executeSyncWithSpec(
 	overrideSpec *spec.ProjectSpec,
 	resolveOpts store.ResolveOptions,
 ) (*syncResult, error) {
-	ps := overrideSpec
-	if ps == nil {
+	rawSpec := overrideSpec
+	if rawSpec == nil {
 		manifestPath := filepath.Join(ec.workDir, "Agentfile.yaml")
 		var err error
-		ps, err = spec.ParseFile(manifestPath)
+		rawSpec, err = spec.ParseRawFile(manifestPath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil, spec.NewPolicyError("Agentfile.yaml not found in %s (run 'agentfile init' first)", ec.workDir)
@@ -129,17 +130,6 @@ func executeSyncWithSpec(
 		effCfg.OnConflict = "fail"
 	}
 
-	reg := registry.Default()
-	activeTargets := ps.Targets
-	if len(opts.Targets) > 0 {
-		activeTargets = opts.Targets
-	}
-	for _, t := range activeTargets {
-		if _, err := registry.Lookup(reg, t); err != nil {
-			return nil, spec.NewPolicyError("target %q is not supported in this milestone (available: %v)", t, registry.Names(reg))
-		}
-	}
-
 	lockPath := filepath.Join(ec.workDir, "Agentfile.lock")
 	lf, err := spec.LoadLock(lockPath)
 	if err != nil {
@@ -163,15 +153,37 @@ func executeSyncWithSpec(
 	if os.Getenv("AGENTFILE_ALLOW_FILE_GIT") == "1" {
 		resolveOpts.ParseOpts.AllowFileScheme = true
 	}
-	res, err := st.ResolveWithOptions(ctx, ec.workDir, ps, lf, resolveOpts)
+
+	compRes, err := st.ComposeManifest(ctx, ec.workDir, rawSpec, lf, resolveOpts)
+	if err != nil {
+		return nil, err
+	}
+	ps := compRes.Composed.Effective
+
+	reg := registry.Default()
+	activeTargets := ps.Targets
+	if len(opts.Targets) > 0 {
+		activeTargets = opts.Targets
+	}
+	for _, t := range activeTargets {
+		if _, err := registry.Lookup(reg, t); err != nil {
+			return nil, spec.NewPolicyError("target %q is not supported in this milestone (available: %v)", t, registry.Names(reg))
+		}
+	}
+
+	res, err := st.ResolveWithOptions(ctx, ec.workDir, ps, compRes.NextLock, resolveOpts)
 	if err != nil {
 		return nil, err
 	}
 	resolvedDeps := res.Assets
 	nextLock := res.NextLock
+	allDeltas := append(append([]store.LockDelta(nil), compRes.Deltas...), res.Deltas...)
+	sort.Slice(allDeltas, func(i, j int) bool {
+		return allDeltas[i].Key < allDeltas[j].Key
+	})
 
 	if opts.CheckOnly {
-		if (lf == nil && len(nextLock.Dependencies) > 0) || (lf != nil && !locksEqual(lf, nextLock)) {
+		if (lf == nil && nextLock.HasRemoteEntries()) || (lf != nil && !locksEqual(lf, nextLock)) {
 			return nil, spec.NewPolicyError("Agentfile.lock is out of sync (run 'agentfile sync')")
 		}
 	}
@@ -246,7 +258,7 @@ func executeSyncWithSpec(
 					binName = adp.BinaryName()
 				}
 				plan.Summary.Warnings = appendUniqueString(plan.Summary.Warnings,
-					fmt.Sprintf("RUNTIME_ONLY_ISOLATION: target %s resolves load_global=false (%s); use 'agentfile run %s' to enforce runtime isolation (bare '%s' still reads user globals)", t, lgSource, t, binName))
+					fmt.Sprintf("RUNTIME_ONLY_ISOLATION: target %s resolves load_global=false (%s); use 'agentfile run %s' or 'agentfile shell-hook <shell>' to enforce runtime isolation (bare '%s' still reads user globals)", t, lgSource, t, binName))
 			}
 		}
 	}
@@ -257,18 +269,18 @@ func executeSyncWithSpec(
 		if drifted, reason := engine.CheckWorkspaceDrift(ec.workDir, plan); drifted {
 			return nil, spec.NewPolicyError("workspace is out of sync with Agentfile.yaml: %s (run 'agentfile sync')", reason)
 		}
-		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
+		return &syncResult{Summary: plan.Summary, Deltas: allDeltas, NextLock: nextLock}, nil
 	}
 
 	showDeltas := resolveOpts.UpdateTarget != "" || opts.Update != ""
 
 	if opts.DryRun {
 		if !opts.QuietStdout {
-			if err := printSummaryWithDeltas(ec.out, &plan.Summary, res.Deltas, true, showDeltas, opts.JSONOutput); err != nil {
+			if err := printSummaryWithDeltas(ec.out, &plan.Summary, allDeltas, true, showDeltas, opts.JSONOutput); err != nil {
 				return nil, err
 			}
 		}
-		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
+		return &syncResult{Summary: plan.Summary, Deltas: allDeltas, NextLock: nextLock}, nil
 	}
 
 	if len(opts.ManifestBytes) > 0 {
@@ -278,7 +290,7 @@ func executeSyncWithSpec(
 			Mode:    0o644,
 		})
 	}
-	if (len(nextLock.Dependencies) > 0 && lf == nil) || (lf != nil && !locksEqual(lf, nextLock)) {
+	if (nextLock.HasRemoteEntries() && lf == nil) || (lf != nil && !locksEqual(lf, nextLock)) {
 		lockBytes, err := marshalLockBytes(nextLock)
 		if err != nil {
 			return nil, err
@@ -295,17 +307,47 @@ func executeSyncWithSpec(
 	}
 	redactPlanSummary(&plan.Summary)
 
+	var extraExtracted []string
+	for _, extEntry := range nextLock.Extends {
+		slug := strings.TrimPrefix(extEntry.ContentHash, "sha256:")
+		if slug != "" {
+			extraExtracted = append(extraExtracted, filepath.Join(st.RootDir, "extracted", slug))
+		}
+	}
+	postCommitProbes, _ := engine.CollectProbes(ec.workDir, probeReqs)
+	for _, t := range activeTargets {
+		adp, _ := registry.Lookup(reg, t)
+		targetProbes := make(adapters.ProbeResults)
+		if adp != nil {
+			for _, req := range adp.RequiredProbes() {
+				targetProbes[req.Key] = postCommitProbes[req.Key]
+			}
+		}
+		_ = engine.SaveRunFastPath(engine.RunFastPathSaveInput{
+			ProjectRoot:        ec.workDir,
+			AgentfileVersion:   Version,
+			Target:             t,
+			EffectiveSpec:      ps,
+			LocalManifests:     compRes.LocalFiles,
+			EffectiveConfig:    effCfg,
+			CacheRoot:          st.RootDir,
+			Probes:             targetProbes,
+			ResolvedAssets:     resolvedDeps,
+			ExtraExtractedDirs: extraExtracted,
+		})
+	}
+
 	if opts.QuietStdout {
 		for _, warn := range plan.Summary.Warnings {
 			fmt.Fprintf(ec.errOut, "warning: %s\n", warn)
 		}
-		return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
+		return &syncResult{Summary: plan.Summary, Deltas: allDeltas, NextLock: nextLock}, nil
 	}
 
-	if err := printSummaryWithDeltas(ec.out, &plan.Summary, res.Deltas, false, showDeltas, opts.JSONOutput); err != nil {
+	if err := printSummaryWithDeltas(ec.out, &plan.Summary, allDeltas, false, showDeltas, opts.JSONOutput); err != nil {
 		return nil, err
 	}
-	return &syncResult{Summary: plan.Summary, Deltas: res.Deltas, NextLock: nextLock}, nil
+	return &syncResult{Summary: plan.Summary, Deltas: allDeltas, NextLock: nextLock}, nil
 }
 
 func redactPlanSummary(s *engine.PlanSummary) {
@@ -333,11 +375,17 @@ func locksEqual(a, b *spec.Lockfile) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if a.Version != b.Version || len(a.Dependencies) != len(b.Dependencies) {
+	if a.Version != b.Version || len(a.Dependencies) != len(b.Dependencies) || len(a.Extends) != len(b.Extends) {
 		return false
 	}
 	for k, va := range a.Dependencies {
 		vb, ok := b.Dependencies[k]
+		if !ok || va != vb {
+			return false
+		}
+	}
+	for k, va := range a.Extends {
+		vb, ok := b.Extends[k]
 		if !ok || va != vb {
 			return false
 		}
@@ -384,6 +432,9 @@ func marshalLockBytes(lf *spec.Lockfile) ([]byte, error) {
 	}
 	out := *lf
 	out.Version = 1
+	if len(out.Extends) == 0 {
+		out.Extends = nil
+	}
 	if out.Dependencies == nil {
 		out.Dependencies = map[string]spec.LockEntry{}
 	}

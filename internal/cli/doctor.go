@@ -140,7 +140,7 @@ func newDoctorCmd(ec *execContext) *cobra.Command {
 					}
 					if !lg && ps != nil {
 						rep.Warnings = appendUniqueString(rep.Warnings,
-							fmt.Sprintf("RUNTIME_ONLY_ISOLATION: target %s resolves load_global=false (%s); bare '%s' invocations still read user globals unless launched via 'agentfile run %s'", t, lgSource, adp.BinaryName(), t))
+							fmt.Sprintf("RUNTIME_ONLY_ISOLATION: target %s resolves load_global=false (%s); bare '%s' invocations still read user globals unless launched via 'agentfile run %s' or 'agentfile shell-hook <shell>'", t, lgSource, adp.BinaryName(), t))
 					}
 				}
 

@@ -52,6 +52,9 @@ func newAddSkillCmd(ec *execContext) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := checkAddProvenance(ec.workDir, origBytes, "skill", name, replace, allowExternalLocal); err != nil {
+				return err
+			}
 			candidateBytes, err := spec.AddSkill(origBytes, spec.AddSkillInput{
 				Name:    name,
 				Source:  source,
@@ -87,6 +90,9 @@ func newAddAgentCmd(ec *execContext) *cobra.Command {
 			name, source := args[0], args[1]
 			manifestPath, origBytes, err := readExistingManifest(ec.workDir)
 			if err != nil {
+				return err
+			}
+			if err := checkAddProvenance(ec.workDir, origBytes, "agent", name, replace, allowExternalLocal); err != nil {
 				return err
 			}
 			candidateBytes, err := spec.AddAgent(origBytes, spec.AddAgentInput{
@@ -129,6 +135,9 @@ func newAddRuleCmd(ec *execContext) *cobra.Command {
 			name, source := args[0], args[1]
 			manifestPath, origBytes, err := readExistingManifest(ec.workDir)
 			if err != nil {
+				return err
+			}
+			if err := checkAddProvenance(ec.workDir, origBytes, "rule", name, replace, allowExternalLocal); err != nil {
 				return err
 			}
 			candidateBytes, err := spec.AddRule(origBytes, spec.AddRuleInput{
@@ -266,6 +275,9 @@ func newAddMCPCmd(ec *execContext) *cobra.Command {
 
 			manifestPath, origBytes, err := readExistingManifest(ec.workDir)
 			if err != nil {
+				return err
+			}
+			if err := checkAddProvenance(ec.workDir, origBytes, "mcp", name, replace, allowExternalLocal); err != nil {
 				return err
 			}
 			candidateBytes, err := spec.AddMCP(origBytes, spec.AddMCPInput{
@@ -432,6 +444,30 @@ func readExistingManifest(workDir string) (string, []byte, error) {
 	return manifestPath, data, nil
 }
 
+func checkAddProvenance(workDir string, origBytes []byte, kind, name string, replace, allowExternalLocal bool) error {
+	rawSpec, err := spec.ParseRaw(bytes.NewReader(origBytes))
+	if err != nil || len(rawSpec.Extends) == 0 {
+		return nil
+	}
+	st, err := store.NewDefaultStore()
+	if err != nil {
+		return nil
+	}
+	lf, _ := spec.LoadLock(filepath.Join(workDir, "Agentfile.lock"))
+	cm, _, err := st.InspectComposedManifest(workDir, rawSpec, lf, store.ParseOptions{
+		AllowExternalLocal: allowExternalLocal,
+		AllowFileScheme:    os.Getenv("AGENTFILE_ALLOW_FILE_GIT") == "1",
+	})
+	if err != nil || cm == nil {
+		return nil
+	}
+	state, orig := cm.EntryProvenance(kind, name)
+	if state == spec.ProvenanceInheritedOnly && !replace {
+		return spec.NewPolicyError("%s %q is already inherited from %s (pass --replace to override it in Agentfile.yaml)", kind, name, orig.DisplayName())
+	}
+	return nil
+}
+
 func commitManifestAdd(
 	ctx context.Context,
 	ec *execContext,
@@ -445,7 +481,7 @@ func commitManifestAdd(
 	if err := schemas.ValidateAgentfileV1(candidateBytes); err != nil {
 		return spec.NewPolicyError("invalid Agentfile.yaml: %v", err)
 	}
-	candidateSpec, err := spec.Parse(bytes.NewReader(candidateBytes))
+	candidateSpec, err := spec.ParseRaw(bytes.NewReader(candidateBytes))
 	if err != nil {
 		return err
 	}

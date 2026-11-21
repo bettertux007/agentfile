@@ -102,6 +102,8 @@ func newRootCmd(ec *execContext) *cobra.Command {
 		newUpgradeCmd(ec),
 		newCleanCmd(ec),
 		newDoctorCmd(ec),
+		newAuditCmd(ec),
+		newShellHookCmd(ec),
 		newRunCmd(ec),
 	)
 	return cmd

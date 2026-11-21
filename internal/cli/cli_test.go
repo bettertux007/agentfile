@@ -3177,3 +3177,172 @@ skills:
 		t.Fatalf("expected .codex/config.toml in codex DriftedPaths while unhydrated, got %+v", codexRep)
 	}
 }
+
+func setupHermeticTestEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("AGENTFILE_NO_USER_CONFIG", "1")
+	t.Setenv("AGENTFILE_CACHE_DIR", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CI", "true")
+}
+
+func TestSprint3ExtendsAddRemoveUpgradeAndRunFastPath(t *testing.T) {
+	setupHermeticTestEnv(t)
+	t.Setenv("AGENTFILE_ALLOW_FILE_GIT", "1")
+
+	tmp := t.TempDir()
+	workRepo := filepath.Join(tmp, "work-base")
+	bareRepo := filepath.Join(tmp, "base.git")
+	binDir := filepath.Join(tmp, "bin")
+	_ = os.MkdirAll(binDir, 0o755)
+	_ = os.WriteFile(filepath.Join(binDir, "claude"), []byte("#!/bin/sh\necho '2.1.278 (Claude Code)'\n"), 0o755)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_ = os.MkdirAll(filepath.Join(workRepo, "base", "skills", "sec-audit"), 0o755)
+	_ = os.WriteFile(filepath.Join(workRepo, "base", "skills", "sec-audit", "SKILL.md"), []byte("# Security Audit v1\n"), 0o644)
+	baseYAML := `version: 1
+targets: [claude, opencode]
+mcp:
+  github:
+    transport: http
+    url: "https://api.githubcopilot.com/mcp/"
+skills:
+  - name: sec-audit
+    source: ./skills/sec-audit
+settings:
+  permissions:
+    deny_commands: ["rm -rf *"]
+targets_config:
+  claude:
+    load_global: false
+`
+	_ = os.WriteFile(filepath.Join(workRepo, "base", "Agentfile.yaml"), []byte(baseYAML), 0o644)
+
+	runGit := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, b)
+		}
+	}
+	runGit(workRepo, "init", "-b", "main")
+	runGit(workRepo, "add", ".")
+	runGit(workRepo, "commit", "-m", "v1 base")
+	runGit(tmp, "clone", "--bare", workRepo, bareRepo)
+
+	proj := t.TempDir()
+	runGit(proj, "init", "-b", "main")
+	_ = os.MkdirAll(filepath.Join(proj, "skills", "payments"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "skills", "payments", "SKILL.md"), []byte("# Payments\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(proj, "skills", "extra"), 0o755)
+	_ = os.WriteFile(filepath.Join(proj, "skills", "extra", "SKILL.md"), []byte("# Extra\n"), 0o644)
+
+	repoURL := "file://" + filepath.ToSlash(bareRepo)
+	childYAML := "version: 1\nextends: \"" + repoURL + "#main//base/Agentfile.yaml\"\ntargets: [claude]\nskills:\n  - name: payments\n    source: ./skills/payments\n"
+	_ = os.WriteFile(filepath.Join(proj, "Agentfile.yaml"), []byte(childYAML), 0o644)
+
+	var out, errOut bytes.Buffer
+	// 1. Sync composes remote base + child, writes Agentfile.lock with extends, and populates .agentfile/run-cache/claude.json.
+	if code := ExecuteWithIO([]string{"sync"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("sync with extends failed (%d): %s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "skills", "sec-audit", "SKILL.md")); err != nil {
+		t.Fatalf("expected inherited skill sec-audit materialized: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "skills", "payments", "SKILL.md")); err != nil {
+		t.Fatalf("expected child skill payments materialized: %v", err)
+	}
+
+	// 2. Warm `agentfile run --dry-run --json claude -p "hi"` hits fast path!
+	out.Reset()
+	errOut.Reset()
+	fpr := &fakeRunProc{}
+	if code := ExecuteWithRunner([]string{"run", "--dry-run", "--json", "claude", "-p", "hi"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }, fpr); code != 0 {
+		t.Fatalf("run --dry-run failed (%d): %s", code, errOut.String())
+	}
+	var dryRep RunDryRunReport
+	if err := json.Unmarshal(out.Bytes(), &dryRep); err != nil {
+		t.Fatalf("unmarshal RunDryRunReport failed: %v", err)
+	}
+	if !dryRep.FastPathHit || dryRep.SyncAction != "fast_path" || dryRep.LoadGlobal != false {
+		t.Fatalf("expected FastPathHit=true, SyncAction=fast_path, LoadGlobal=false (inherited from base), got %+v", dryRep)
+	}
+
+	// 3. `agentfile add skill extra ./skills/extra` preserves inherited sec-audit; `remove skill sec-audit` fails closed with origin error.
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "extra", "./skills/extra"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("add skill extra failed (%d): %s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "skills", "sec-audit", "SKILL.md")); err != nil {
+		t.Fatalf("expected inherited sec-audit skill retained after add skill extra: %v", err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"remove", "skill", "sec-audit"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 when removing inherited-only skill sec-audit, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "inherited from") {
+		t.Fatalf("expected origin attribution in remove error, got: %s", errOut.String())
+	}
+
+	// 4. `add skill sec-audit ./skills/extra` without --replace fails advising --replace; with --replace overrides locally;
+	// then `remove skill sec-audit` removes local override and reverts to inherited base!
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "sec-audit", "./skills/extra"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 2 {
+		t.Fatalf("expected exit 2 when shadowing inherited skill without --replace, got %d", code)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"add", "skill", "sec-audit", "./skills/extra", "--replace"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("expected add --replace on inherited skill to succeed (%d): %s", code, errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"remove", "skill", "sec-audit"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("expected remove of local override to succeed and revert to base (%d): %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "reverting to inherited definition") {
+		t.Fatalf("expected revert notice on stderr, got: %s", errOut.String())
+	}
+
+	// 5. Commit new revision to remote base repo and run `agentfile upgrade extends` -> updates extends lock entry.
+	_ = os.WriteFile(filepath.Join(workRepo, "base", "skills", "sec-audit", "SKILL.md"), []byte("# Security Audit v2\n"), 0o644)
+	runGit(workRepo, "add", ".")
+	runGit(workRepo, "commit", "-m", "v2 base")
+	runGit(workRepo, "push", bareRepo, "main:main")
+
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithIO([]string{"upgrade", "extends", "--json"}, proj, strings.NewReader(""), &out, &errOut, func() bool { return false }); code != 0 {
+		t.Fatalf("upgrade extends failed (%d): %s", code, errOut.String())
+	}
+	var upgRep UpgradeReport
+	if err := json.Unmarshal(out.Bytes(), &upgRep); err != nil {
+		t.Fatalf("unmarshal UpgradeReport failed: %v", err)
+	}
+	if len(upgRep.Deltas) == 0 || upgRep.Deltas[0].Action != "updated" {
+		t.Fatalf("expected updated extends delta, got %+v", upgRep.Deltas)
+	}
+
+	// 6. Subdirectory --project-root and --if-configured passthrough on unconfigured target (opencode).
+	subDir := filepath.Join(proj, "services", "api")
+	_ = os.MkdirAll(subDir, 0o755)
+	out.Reset()
+	errOut.Reset()
+	if code := ExecuteWithRunner([]string{"run", "--if-configured", "--project-root", proj, "--dry-run", "--json", "opencode", "-p", "hi"}, subDir, strings.NewReader(""), &out, &errOut, func() bool { return false }, fpr); code != 0 {
+		t.Fatalf("run --if-configured opencode failed (%d): %s", code, errOut.String())
+	}
+	var passRep RunDryRunReport
+	_ = json.Unmarshal(out.Bytes(), &passRep)
+	if passRep.SyncAction != "passthrough" {
+		t.Fatalf("expected passthrough SyncAction for unconfigured target under --if-configured, got %+v", passRep)
+	}
+}

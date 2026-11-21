@@ -56,7 +56,7 @@ func newDiffCmd(ec *execContext) *cobra.Command {
 			if err := schemas.ValidateAgentfileV1(rawManifest); err != nil {
 				return spec.NewPolicyError("invalid Agentfile.yaml: %v", err)
 			}
-			ps, err := spec.ParseFile(manifestPath)
+			rawSpec, err := spec.ParseRawFile(manifestPath)
 			if err != nil {
 				return err
 			}
@@ -67,17 +67,6 @@ func newDiffCmd(ec *execContext) *cobra.Command {
 			}
 			for _, w := range effCfg.Warnings {
 				fmt.Fprintf(ec.errOut, "warning: %s\n", diff.RedactSecrets(w))
-			}
-
-			reg := registry.Default()
-			activeTargets := ps.Targets
-			if len(targets) > 0 {
-				activeTargets = targets
-			}
-			for _, t := range activeTargets {
-				if _, lerr := registry.Lookup(reg, t); lerr != nil {
-					return spec.NewPolicyError("target %q is not supported (available: %v)", t, registry.Names(reg))
-				}
 			}
 
 			lockPath := filepath.Join(ec.workDir, "Agentfile.lock")
@@ -98,11 +87,12 @@ func newDiffCmd(ec *execContext) *cobra.Command {
 				AllowFileScheme: os.Getenv("AGENTFILE_ALLOW_FILE_GIT") == "1",
 			}
 
+			var ps *spec.ProjectSpec
 			var resolvedDeps map[string]store.ResolvedAsset
 			var lockStatus string
 
 			if !fetch {
-				insDep, derr := st.InspectDependencies(ec.workDir, ps, lf, parseOpts)
+				composed, insDep, derr := st.InspectComposedManifest(ec.workDir, rawSpec, lf, parseOpts)
 				if derr != nil {
 					return derr
 				}
@@ -112,10 +102,18 @@ func newDiffCmd(ec *execContext) *cobra.Command {
 				if len(insDep.Unhydrated) > 0 {
 					return spec.NewPolicyError("unhydrated remote dependencies (%s); run 'agentfile diff --fetch' or 'agentfile sync'", strings.Join(insDep.Unhydrated, ", "))
 				}
+				ps = composed.Effective
 				resolvedDeps = insDep.Assets
 				lockStatus = insDep.LockStatus
 			} else {
-				res, rerr := st.ResolveWithOptions(cmd.Context(), ec.workDir, ps, lf, store.ResolveOptions{
+				compRes, cerr := st.ComposeManifest(cmd.Context(), ec.workDir, rawSpec, lf, store.ResolveOptions{
+					ParseOpts: parseOpts,
+				})
+				if cerr != nil {
+					return cerr
+				}
+				ps = compRes.Composed.Effective
+				res, rerr := st.ResolveWithOptions(cmd.Context(), ec.workDir, ps, compRes.NextLock, store.ResolveOptions{
 					ParseOpts: parseOpts,
 				})
 				if rerr != nil {
@@ -123,12 +121,23 @@ func newDiffCmd(ec *execContext) *cobra.Command {
 				}
 				resolvedDeps = res.Assets
 				switch {
-				case lf == nil && len(res.NextLock.Dependencies) == 0:
+				case lf == nil && !res.NextLock.HasRemoteEntries():
 					lockStatus = "not_required"
 				case lf == nil:
 					lockStatus = "missing"
 				default:
 					lockStatus = "ok"
+				}
+			}
+
+			reg := registry.Default()
+			activeTargets := ps.Targets
+			if len(targets) > 0 {
+				activeTargets = targets
+			}
+			for _, t := range activeTargets {
+				if _, lerr := registry.Lookup(reg, t); lerr != nil {
+					return spec.NewPolicyError("target %q is not supported (available: %v)", t, registry.Names(reg))
 				}
 			}
 
