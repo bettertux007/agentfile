@@ -1,0 +1,92 @@
+version: 1
+dependencies:
+    agent:egm-bootstrap-orchestrator:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:1da60b05e8348132500c50c5824247678fb5aeaa09e3f26b50f1588e39b7c6cb
+    agent:egm-codebase-details:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:db7a69938aae341ace1e438fa2f5caacf1636a2970af016f308b4d713d12d777
+    agent:egm-comprehension:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:bd6f738acc5045b47e0f342e18b93136e88e5d73ac3f92e981bddd423d710e19
+    agent:egm-design:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:9f65c45fc043be1140bc36244c5e512a8acc0e50009fbe94cddb9163b667948c
+    agent:egm-implementation-readiness:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:ad7c629b434fa8fbb4421b4ce1dac389ba3e515631c1cefb06f496c3241a32aa
+    agent:egm-inventive-catalyst:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:64c79d184a5c71afbb45420d393e0e19a5aeecdc4965a5053c9495b03549b867
+    agent:egm-structural:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:268cab72ac16f82d43f5a52156de8d29b7879e7bd4dee9412da8e2b530dbc7e8
+    agent:egm-style:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:46287dbe3960fc4f0ef2c3fd0aec0364d1f63f74593197c0b149d9b77530175d
+    agent:egm-synthesizer:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:e2ad6f67650e8a742b8bf379a55f3b452935bac42f53ce93892335bca7e79bb3
+    agent:egm-zoom-out:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:1394fb45b6c4b6a750897a4dea32888846f0b869a25faff182ef8f7e6ad9b607
+    skill:egm-bootstrap:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:071534ab8b6256b6c2e2cd76665fad82715d46447099e29cee9b76b5301a3358
+    skill:egm-brainstorm:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:51f3c81015ea4264597c47bc2dc78bc9666241907d9823a2f18b2ffa6ff73e65
+    skill:egm-bundle:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:ac48ea65ca0509c67e722acd5d1d7cebcf300164cff080396f67986f8f341078
+    skill:egm-draft:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:9b49ade98de32c84f0dad2c7eac763ceacacb51fd1a233959f304ddd3f53a3fc
+    skill:egm-drift-report:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:ef8afce177840c6192a74cda85e93a2b72363e47f99222bdb85c25eead186c1f
+    skill:egm-resolve:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:c7e4178c444e6f5d1e83c7c0d8c1e6510cce69730756daef2550daecdf72db60
+    skill:egm-review:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:9afe357c6e45a28fc43bcb7b0f2921fce2d27e31a9f9199063c5e9e1daf6d6fc
+    skill:egm-review-loop:
+        source: https://github.com/google/elephant-goldfish-model.git
+        ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        commit_sha: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+        content_hash: sha256:bef7d97fa5a1c70d865f3e76c50341dfcaac8b6be45b06505df353b9332d85fd

@@ -1,0 +1,51 @@
+version: 1
+targets:
+  - claude
+  - opencode
+  - gemini
+  - cursor
+
+mcp:
+  filesystem:
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "./docs"]
+    env:
+      LOG_LEVEL: "info"
+  github:
+    transport: http
+    url: "https://api.githubcopilot.com/mcp/"
+    headers:
+      Authorization: "Bearer ${GITHUB_PAT}"
+
+skills:
+  - name: terraform-auditor
+    source: ./skills/terraform-auditor
+
+agents:
+  - name: security-reviewer
+    description: "Audits IaC and application code for security issues"
+    model: sonnet
+    source: ./agents/security-reviewer.md
+
+rules:
+  - name: coding-standards
+    source: ./docs/AGENT_RULES.md
+    description: "Repository Go and Terraform conventions"
+    globs: ["**/*.go", "**/*.tf"]
+    always_apply: false
+
+settings:
+  permissions:
+    allow_commands:
+      - "go test ./..."
+    deny_commands:
+      - "rm -rf *"
+
+targets_config:
+  opencode:
+    on_unsupported: warn
+  gemini:
+    on_unsupported: warn
+  cursor:
+    on_unsupported: warn

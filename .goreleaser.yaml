@@ -1,0 +1,50 @@
+version: 2
+
+project_name: agentfile
+
+before:
+  hooks:
+    - go mod tidy
+    - go test -race ./...
+
+builds:
+  - id: agentfile
+    main: ./cmd/agentfile
+    binary: agentfile
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/bettertux007/agentfile/internal/cli.Version={{.Version}}
+      - -X github.com/bettertux007/agentfile/internal/cli.Commit={{.ShortCommit}}
+      - -X github.com/bettertux007/agentfile/internal/cli.Date={{.Date}}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

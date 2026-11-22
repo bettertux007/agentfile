@@ -1,0 +1,322 @@
+# yaml-language-server: $schema=./schemas/v1/agentfile.schema.json
+version: 1
+
+targets:
+  - opencode
+  - claude
+
+targets_config:
+  opencode:
+    load_global: false
+    overrides:
+      plugins:
+        - "superpowers@git+https://github.com/obra/superpowers.git"
+      agents:
+        egm-codebase-details:
+          description: "EGM read-only codebase_details reviewer"
+          mode: "subagent"
+          color: "#E86E00"
+          permissions:
+            - { action: "*", resource: "*", effect: "deny" }
+            - { action: "read", resource: "*", effect: "allow" }
+            - { action: "read", resource: "*.env", effect: "deny" }
+            - { action: "read", resource: "*.env.*", effect: "deny" }
+            - { action: "read", resource: "*.env.example", effect: "allow" }
+            - { action: "glob", resource: "*", effect: "allow" }
+            - { action: "external_directory", resource: "*", effect: "deny" }
+          system: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read .opencode/skills/egm-bundle/agents/codebase_details.md before the target and supplied standards. Return findings to the caller. Do not write reports or delegate. Read prior reports only when explicitly supplied and required by the canonical stage. Do not retrieve unsolicited history, memory, or earlier reviewer findings. Report inaccessible required files as an incomplete review."
+        egm-comprehension:
+          description: "EGM read-only comprehension reviewer"
+          mode: "subagent"
+          color: "#E86E00"
+          permissions:
+            - { action: "*", resource: "*", effect: "deny" }
+            - { action: "read", resource: "*", effect: "allow" }
+            - { action: "read", resource: "*.env", effect: "deny" }
+            - { action: "read", resource: "*.env.*", effect: "deny" }
+            - { action: "read", resource: "*.env.example", effect: "allow" }
+            - { action: "glob", resource: "*", effect: "allow" }
+            - { action: "external_directory", resource: "*", effect: "deny" }
+          system: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read .opencode/skills/egm-bundle/agents/comprehension.md before the target and supplied standards. Return findings to the caller. Do not write reports or delegate. Read prior reports only when explicitly supplied and required by the canonical stage. Do not retrieve unsolicited history, memory, or earlier reviewer findings. Report inaccessible required files as an incomplete review."
+        egm-design:
+          description: "EGM read-only design_critic reviewer"
+          mode: "subagent"
+          color: "#E86E00"
+          permissions:
+            - { action: "*", resource: "*", effect: "deny" }
+            - { action: "read", resource: "*", effect: "allow" }
+            - { action: "read", resource: "*.env", effect: "deny" }
+            - { action: "read", resource: "*.env.*", effect: "deny" }
+            - { action: "read", resource: "*.env.example", effect: "allow" }
+            - { action: "glob", resource: "*", effect: "allow" }
+            - { action: "external_directory", resource: "*", effect: "deny" }
+          system: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read .opencode/skills/egm-bundle/agents/design_critic.md before the target and supplied standards. Return findings to the caller. Do not write reports or delegate. Read prior reports only when explicitly supplied and required by the canonical stage. Do not retrieve unsolicited history, memory, or earlier reviewer findings. Report inaccessible required files as an incomplete review."
+        egm-implementation-readiness:
+          description: "EGM read-only implementation_readiness reviewer"
+          mode: "subagent"
+          color: "#E86E00"
+          permissions:
+            - { action: "*", resource: "*", effect: "deny" }
+            - { action: "read", resource: "*", effect: "allow" }
+            - { action: "read", resource: "*.env", effect: "deny" }
+            - { action: "read", resource: "*.env.*", effect: "deny" }
+            - { action: "read", resource: "*.env.example", effect: "allow" }
+            - { action: "glob", resource: "*", effect: "allow" }
+            - { action: "external_directory", resource: "*", effect: "deny" }
+          system: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read .opencode/skills/egm-bundle/agents/implementation_readiness.md before the target and supplied standards. Return findings to the caller. Do not write reports or delegate. Read prior reports only when explicitly supplied and required by the canonical stage. Do not retrieve unsolicited history, memory, or earlier reviewer findings. Report inaccessible required files as an incomplete review."
+        egm-inventive-catalyst:
+          description: "EGM read-only inventive_catalyst reviewer"
+          mode: "subagent"
+          color: "#E86E00"
+          permissions:
+            - { action: "*", resource: "*", effect: "deny" }
+            - { action: "read", resource: "*", effect: "allow" }
+            - { action: "read", resource: "*.env", effect: "deny" }
+            - { action: "read", resource: "*.env.*", effect: "deny" }
+            - { action: "read", resource: "*.env.example", effect: "allow" }
+            - { action: "glob", resource: "*", effect: "allow" }
+            - { action: "external_directory", resource: "*", effect: "deny" }
+          system: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read .opencode/skills/egm-bundle/agents/inventive_catalyst.md before the target and supplied standards. Return findings to the caller. Do not write reports or delegate. Read prior reports only when explicitly supplied and required by the canonical stage. Do not retrieve unsolicited history, memory, or earlier reviewer findings. Report inaccessible required files as an incomplete review."
+        egm-structural:
+          description: "EGM read-only structural reviewer"
+          mode: "subagent"
+          color: "#E86E00"
+          permissions:
+            - { action: "*", resource: "*", effect: "deny" }
+            - { action: "read", resource: "*", effect: "allow" }
+            - { action: "read", resource: "*.env", effect: "deny" }
+            - { action: "read", resource: "*.env.*", effect: "deny" }
+            - { action: "read", resource: "*.env.example", effect: "allow" }
+            - { action: "glob", resource: "*", effect: "allow" }
+            - { action: "external_directory", resource: "*", effect: "deny" }
+          system: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read .opencode/skills/egm-bundle/agents/structural.md before the target and supplied standards. Return findings to the caller. Do not write reports or delegate. Read prior reports only when explicitly supplied and required by the canonical stage. Do not retrieve unsolicited history, memory, or earlier reviewer findings. Report inaccessible required files as an incomplete review."
+        egm-style:
+          description: "EGM read-only style reviewer"
+          mode: "subagent"
+          color: "#E86E00"
+          permissions:
+            - { action: "*", resource: "*", effect: "deny" }
+            - { action: "read", resource: "*", effect: "allow" }
+            - { action: "read", resource: "*.env", effect: "deny" }
+            - { action: "read", resource: "*.env.*", effect: "deny" }
+            - { action: "read", resource: "*.env.example", effect: "allow" }
+            - { action: "glob", resource: "*", effect: "allow" }
+            - { action: "external_directory", resource: "*", effect: "deny" }
+          system: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read .opencode/skills/egm-bundle/agents/style.md before the target and supplied standards. Return findings to the caller. Do not write reports or delegate. Read prior reports only when explicitly supplied and required by the canonical stage. Do not retrieve unsolicited history, memory, or earlier reviewer findings. Report inaccessible required files as an incomplete review."
+        egm-zoom-out:
+          description: "EGM read-only zoom_out reviewer"
+          mode: "subagent"
+          color: "#E86E00"
+          permissions:
+            - { action: "*", resource: "*", effect: "deny" }
+            - { action: "read", resource: "*", effect: "allow" }
+            - { action: "read", resource: "*.env", effect: "deny" }
+            - { action: "read", resource: "*.env.*", effect: "deny" }
+            - { action: "read", resource: "*.env.example", effect: "allow" }
+            - { action: "glob", resource: "*", effect: "allow" }
+            - { action: "external_directory", resource: "*", effect: "deny" }
+          system: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read .opencode/skills/egm-bundle/agents/zoom_out.md before the target and supplied standards. Return findings to the caller. Do not write reports or delegate. Read prior reports only when explicitly supplied and required by the canonical stage. Do not retrieve unsolicited history, memory, or earlier reviewer findings. Report inaccessible required files as an incomplete review."
+        egm:
+          description: "EGM orchestrator"
+          mode: "primary"
+          color: "#1B6EF3"
+          permissions:
+            - { action: "*", resource: "*", effect: "ask" }
+            - { action: "read", resource: "*", effect: "allow" }
+            - { action: "read", resource: "*.env", effect: "ask" }
+            - { action: "read", resource: "*.env.*", effect: "ask" }
+            - { action: "read", resource: "*.env.example", effect: "allow" }
+            - { action: "glob", resource: "*", effect: "allow" }
+            - { action: "grep", resource: "*", effect: "allow" }
+            - { action: "question", resource: "*", effect: "allow" }
+            - { action: "skill", resource: "*", effect: "deny" }
+            - { action: "skill", resource: "egm-*", effect: "allow" }
+            - { action: "subagent", resource: "*", effect: "deny" }
+            - { action: "subagent", resource: "egm-codebase-details", effect: "allow" }
+            - { action: "subagent", resource: "egm-comprehension", effect: "allow" }
+            - { action: "subagent", resource: "egm-design", effect: "allow" }
+            - { action: "subagent", resource: "egm-implementation-readiness", effect: "allow" }
+            - { action: "subagent", resource: "egm-inventive-catalyst", effect: "allow" }
+            - { action: "subagent", resource: "egm-structural", effect: "allow" }
+            - { action: "subagent", resource: "egm-style", effect: "allow" }
+            - { action: "subagent", resource: "egm-zoom-out", effect: "allow" }
+            - { action: "external_directory", resource: "*", effect: "ask" }
+          system: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Follow the canonical skill. Dispatch reviewers directly with the subagent tool using the registered persona name as agent (for example egm-zoom-out). Omit sessionID for every independent review; never resume a reviewer. Wait for subagent completion before synthesizing. Pass only the task, absolute resource paths, target, standards, and selected reading list, not conversation history. Stop if delegation or a required completion is missing. When running brainstorm before draft, complete all seven brainstorm reviewers and synthesize their findings into concepts_brief.md before drafting. In review, write each completed stage report before starting the next stage. Before Step 8, verify zoom_out_report.md exists in the artifact directory and pass its absolute path to the reviewer; stop if it is missing. Write reports yourself. Preserve every human approval gate."
+      commands:
+        egm-bootstrap:
+          description: "Run egm-bootstrap"
+          agent: "egm"
+          template: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read and execute .opencode/skills/egm-bundle/skills/egm-bootstrap/SKILL.md.\nUser request: $ARGUMENTS"
+        egm-brainstorm:
+          description: "Run egm-brainstorm"
+          agent: "egm"
+          template: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read and execute .opencode/skills/egm-bundle/skills/egm-brainstorm/SKILL.md.\nUser request: $ARGUMENTS"
+        egm-draft:
+          description: "Run egm-draft"
+          agent: "egm"
+          template: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read and execute .opencode/skills/egm-bundle/skills/egm-draft/SKILL.md.\nUser request: $ARGUMENTS"
+        egm-drift-report:
+          description: "Run egm-drift-report"
+          agent: "egm"
+          template: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read and execute .opencode/skills/egm-bundle/skills/egm-drift-report/SKILL.md.\nUser request: $ARGUMENTS"
+        egm-resolve:
+          description: "Run egm-resolve"
+          agent: "egm"
+          template: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read and execute .opencode/skills/egm-bundle/skills/egm-resolve/SKILL.md.\nUser request: $ARGUMENTS"
+        egm-review:
+          description: "Run egm-review"
+          agent: "egm"
+          template: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read and execute .opencode/skills/egm-bundle/skills/egm-review/SKILL.md.\nUser request: $ARGUMENTS"
+        egm-review-loop:
+          description: "Run egm-review-loop"
+          agent: "egm"
+          template: "Read .opencode/skills/egm-bundle/docs/opencode.md first. EGM bundle root: .opencode/skills/egm-bundle. Resolve agents/, resources/, and docs/ against this root. Resolve references/ against the canonical skill directory. Resolve user files and outputs against the project working directory. Read and execute .opencode/skills/egm-bundle/skills/egm-review-loop/SKILL.md.\nUser request: $ARGUMENTS"
+  claude:
+    load_global: false
+
+settings:
+  permissions:
+    allow_commands:
+      - "go test"
+      - "go vet"
+      - "go build"
+      - "gofmt"
+      - "make"
+      - "git status"
+      - "git diff"
+      - "git log"
+    deny_commands:
+      - "rm -rf /"
+      - "git push --force"
+      - "git reset --hard"
+
+skills:
+  - name: egm-bundle
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+  - name: egm-brainstorm
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: skills/egm-brainstorm
+  - name: egm-draft
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: skills/egm-draft
+  - name: egm-review
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: skills/egm-review
+  - name: egm-review-loop
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: skills/egm-review-loop
+  - name: egm-resolve
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: skills/egm-resolve
+  - name: egm-drift-report
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: skills/egm-drift-report
+  - name: egm-bootstrap
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: skills/egm-bootstrap
+  - name: add-target-adapter
+    source: ./.agentfile/skills/add-target-adapter
+  - name: release-check
+    source: ./.agentfile/skills/release-check
+
+agents:
+  - name: egm-zoom-out
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/zoom_out.md
+    description: "EGM read-only zoom_out reviewer"
+  - name: egm-design
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/design_critic.md
+    description: "EGM read-only design_critic reviewer"
+  - name: egm-structural
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/structural.md
+    description: "EGM read-only structural reviewer"
+  - name: egm-codebase-details
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/codebase_details.md
+    description: "EGM read-only codebase_details reviewer"
+  - name: egm-comprehension
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/comprehension.md
+    description: "EGM read-only comprehension reviewer"
+  - name: egm-implementation-readiness
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/implementation_readiness.md
+    description: "EGM read-only implementation_readiness reviewer"
+  - name: egm-inventive-catalyst
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/inventive_catalyst.md
+    description: "EGM read-only inventive_catalyst reviewer"
+  - name: egm-style
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/style.md
+    description: "EGM read-only style reviewer"
+  - name: egm-synthesizer
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/synthesizer.md
+    description: "EGM synthesizer orchestrator subagent"
+  - name: egm-bootstrap-orchestrator
+    source:
+      git: https://github.com/google/elephant-goldfish-model.git
+      ref: 8b1553f5c6dc84c60b7e065f0040199d72c54c54
+      path: agents/bootstrap_orchestrator.md
+    description: "EGM bootstrap orchestrator subagent"
+  - name: adapter-reviewer
+    source: ./.agentfile/agents/adapter-reviewer.md
+    description: "Audits agentfile target adapters for I/O-free purity, DAG compliance, policy enforcement, and golden tests"
+  - name: security-reviewer
+    source: ./.agentfile/agents/security-reviewer.md
+    description: "Audits agentfile Git hydration, manifest composition, secret redaction, and fail-closed security invariants"
+
+rules:
+  - name: egm-project-binding
+    source: ./.agentfile/rules/egm-project-binding.md
+    description: "Binds EGM artifact directory (.egm) and workspace EGM bundle root for isolated sessions"
+    always_apply: true
+  - name: go-testing-portability
+    source: ./.agentfile/rules/go-testing-portability.md
+    description: "Hermetic Go testing and Windows/Linux/macOS portability standards"
+    globs:
+      - "**/*_test.go"
+  - name: schema-manifest-sync
+    source: ./.agentfile/rules/schema-manifest-sync.md
+    description: "Lockstep synchronization across internal/spec, schemas/v1, and root/starter Agentfile.yaml manifests"
+    globs:
+      - "internal/spec/**"
+      - "schemas/**"
+      - "internal/adapters/**"

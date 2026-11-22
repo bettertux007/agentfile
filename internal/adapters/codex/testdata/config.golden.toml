@@ -1,0 +1,21 @@
+approval_policy = 'on-request'
+model = 'o3'
+
+[mcp_servers]
+[mcp_servers.filesystem]
+args = ['-y', '@modelcontextprotocol/server-filesystem', './docs']
+command = 'npx'
+env_vars = ['GITHUB_TOKEN', 'OPENAI_API_KEY']
+
+[mcp_servers.filesystem.env]
+LOG_LEVEL = 'info'
+
+[mcp_servers.github]
+bearer_token_env_var = 'GITHUB_PAT'
+url = 'https://api.githubcopilot.com/mcp/'
+
+[mcp_servers.github.env_http_headers]
+X-API-Key = 'KEY'
+
+[mcp_servers.github.http_headers]
+X-Client = 'agentfile'

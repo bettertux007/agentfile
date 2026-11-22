@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bettertux007/agentfile/schemas/v1/agentfile-config.schema.json",
+  "title": "Agentfile Local Tool Config (v1)",
+  "description": "Machine-local workflow preferences stored in .agentfile/config.yaml or user-global personal defaults in ~/.config/agentfile/config.yaml.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "default": 1,
+      "description": "Local config schema version. Must be integer 1."
+    },
+    "link_mode": {
+      "type": "string",
+      "enum": ["copy", "symlink"],
+      "default": "copy",
+      "description": "How skill directories are materialized in the workspace: copy (default) or symlink (workspace-local sources only)."
+    },
+    "on_conflict": {
+      "type": "string",
+      "enum": ["ask", "fail", "backup", "overwrite"],
+      "description": "Collision policy for unmanaged files or user-edited managed keys/blocks. Defaults to 'ask' in interactive TTYs and 'fail' in non-TTY/CI environments."
+    },
+    "git_exclude": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether agentfile manages worktree-keyed blocks in <git-common-dir>/info/exclude for generated artifacts and .agentfile/."
+    },
+    "load_global": {
+      "type": "boolean",
+      "default": true,
+      "description": "Default machine-local runtime global-config loading policy for agentfile run (true loads native globals; false isolates when supported)."
+    }
+  },
+  "examples": [
+    {
+      "version": 1,
+      "link_mode": "copy",
+      "on_conflict": "ask",
+      "git_exclude": true
+    }
+  ]
+}
